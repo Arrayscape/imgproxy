@@ -1,6 +1,16 @@
-ARG BASE_IMAGE_VERSION="v4.1.5"
+# Base image built from our fork of imgproxy-docker-base, which carries one
+# libvips patch: upstream 4a24c7c98 (libvips#4909), correcting a half-output-
+# pixel displacement when enlarging. Every libvips release through 8.18.6 has
+# it; the patched build reports 8.18.5.vips4909 so it cannot be mistaken for a
+# stock release.
+#
+# Parameterised so an unmodified upstream base can be substituted:
+#   --build-arg BASE_IMAGE=ghcr.io/imgproxy/imgproxy-base
+#   --build-arg BASE_IMAGE_VERSION=v4.1.5
+ARG BASE_IMAGE="ghcr.io/arrayscape/imgproxy-base"
+ARG BASE_IMAGE_VERSION="v4.1.5-2-vips4909"
 
-FROM ghcr.io/imgproxy/imgproxy-base:${BASE_IMAGE_VERSION} AS build
+FROM ${BASE_IMAGE}:${BASE_IMAGE_VERSION} AS build
 
 ENV CGO_ENABLED=1
 
