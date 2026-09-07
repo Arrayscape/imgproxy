@@ -7,8 +7,10 @@ package vips
 */
 import "C"
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"unsafe"
 
 	"github.com/imgproxy/imgproxy/v4/imagedata"
@@ -179,44 +181,76 @@ func HasNearLosslessLevel() bool {
 	return C.vips_has_near_lossless_level() != 0
 }
 
-// CheckWixEnvironment enforces OP-SPEC §2 and is called when the Wix route is
-// enabled. It returns a hard error only for settings that silently change the
-// transform; everything else is a warning the caller logs.
-func CheckWixEnvironment(allowWrongTileHeight bool) (warnings []string, err error) {
-	// §2.1: disabling the vector path is one of the two settings that costs
-	// roughly 5% of the corpus. Measured: 6 of 12 renditions change.
+// CheckWixEnvironment enforces OP-SPEC §1 and §2 when the Wix route is enabled.
+//
+// Everything that would silently change the transform is a hard error, not a
+// warning. A wrong build still serves images and still looks healthy -- it just
+// renders different bytes -- so the only safe failure mode is refusing to start.
+//
+// allowUnverified downgrades the libvips build checks to warnings, for running
+// on an unmodified upstream base and accepting non-exact output.
+func CheckWixEnvironment(allowWrongTileHeight, allowUnverified bool) (warnings []string, err error) {
+	// §2.1 -- no escape hatch: disabling the vector path is one of the two
+	// settings that costs roughly 5% of the corpus, and it is never wanted.
+	// Measured: 6 of 12 renditions change.
 	if _, ok := os.LookupEnv("VIPS_NOVECTOR"); ok {
-		return nil, fmt.Errorf(
+		return nil, errors.New(
 			"VIPS_NOVECTOR is set, which disables the ORC vector path and silently " +
 				"changes the transform; unset it (OP-SPEC §2.1)")
 	}
 
-	// §2: reducev accumulates Y within a strip and restarts at each boundary,
+	// §2 -- reducev accumulates Y within a strip and restarts at each boundary,
 	// so the strip height decides which output rows land exactly on a phase
 	// tie. libvips defaults to 10; the CDN behaves as 16.
 	switch th, ok := os.LookupEnv("VIPS_TILE_HEIGHT"); {
 	case !ok:
-		// Patch 0001 reads g_getenv at each reducev call, not at init, and cgo
-		// makes os.Setenv call C setenv(3) -- so setting it here takes effect.
+		// Patch 0001 reads g_getenv at each reducev call rather than at init,
+		// and cgo makes os.Setenv call C setenv(3), so setting it here works.
 		if serr := os.Setenv("VIPS_TILE_HEIGHT", "16"); serr != nil {
 			return nil, fmt.Errorf("cannot set VIPS_TILE_HEIGHT=16: %w", serr)
 		}
 	case th != "16" && !allowWrongTileHeight:
 		return nil, fmt.Errorf(
 			"VIPS_TILE_HEIGHT=%s but the Wix transform requires 16 (OP-SPEC §2); "+
-				"set it to 16, or override deliberately", th)
+				"set it to 16, or set IMGPROXY_WIX_ALLOW_WRONG_TILE_HEIGHT=true to "+
+				"override deliberately", th)
 	}
 
-	if !HasNearLosslessLevel() {
-		warnings = append(warnings,
-			"libvips lacks the near_lossless_level property (patch 0002): lossless "+
-				"WebP will fall back to plain --lossless and will not match the CDN")
-	}
+	var problems []string
+
+	// §1 pins stock 8.15.5. Other versions resample differently -- reducev was
+	// re-vectorised after 8.14 and again later, and the difference shows on any
+	// image that varies vertically, which is every photograph.
 	if maj, min, mic := WixLibvipsVersion(); maj != 8 || min != 15 {
-		warnings = append(warnings, fmt.Sprintf(
-			"libvips %d.%d.%d is not 8.15.x; OP-SPEC §1 pins 8.15.5 and other "+
-				"versions resample differently", maj, min, mic))
+		problems = append(problems, fmt.Sprintf(
+			"libvips is %d.%d.%d, but OP-SPEC §1 pins 8.15.5", maj, min, mic))
 	}
+
+	// Patch 0002 is directly detectable. Patch 0001 is not -- it changes a
+	// literal inside reducev with no observable property -- but the two are
+	// applied together by docker/wix/Dockerfile, so 0002's absence means
+	// VIPS_TILE_HEIGHT above is inert and the transform is wrong.
+	if !HasNearLosslessLevel() {
+		problems = append(problems,
+			"libvips lacks the near_lossless_level property, so docker/wix/0002 is "+
+				"not applied (and almost certainly 0001 is not either, which makes "+
+				"VIPS_TILE_HEIGHT inert)")
+	}
+
+	if len(problems) > 0 {
+		msg := "the Wix route needs the libvips built by docker/wix/Dockerfile: " +
+			strings.Join(problems, "; ")
+		if !allowUnverified {
+			return nil, errors.New(msg +
+				". Refusing to start: this build would serve images that silently do " +
+				"not reproduce the CDN. Set IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS=true " +
+				"to run anyway with non-exact output")
+		}
+		warnings = append(warnings, msg+
+			" -- running anyway because IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS is set; "+
+			"output will NOT match the CDN")
+	}
+
 	return warnings, nil
 }
 

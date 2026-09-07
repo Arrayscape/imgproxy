@@ -18,6 +18,7 @@ var (
 	IMGPROXY_WIX_AVIF_SPEED  = env.Int("IMGPROXY_WIX_AVIF_SPEED")
 	IMGPROXY_WIX_SIG_MODE    = env.String("IMGPROXY_WIX_SIGNATURE_MODE")
 	IMGPROXY_WIX_ALLOW_TH    = env.Bool("IMGPROXY_WIX_ALLOW_WRONG_TILE_HEIGHT")
+	IMGPROXY_WIX_ALLOW_VIPS  = env.Bool("IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS")
 )
 
 // Signature modes.
@@ -64,6 +65,11 @@ type Config struct {
 	// with the wrong value silently produces a different transform, so this
 	// must be set deliberately.
 	AllowWrongTileHeight bool
+
+	// AllowUnverifiedLibvips permits starting on a libvips that is not the
+	// patched 8.15.5 the transform is defined against -- for instance an
+	// unmodified upstream imgproxy base. Output will not reproduce the CDN.
+	AllowUnverifiedLibvips bool
 }
 
 func NewDefaultConfig() Config {
@@ -90,6 +96,7 @@ func LoadConfigFromEnv(c *Config) (*Config, error) {
 		IMGPROXY_WIX_AVIF_SPEED.Parse(&c.AVIFSpeed),
 		IMGPROXY_WIX_SIG_MODE.Parse(&c.SignatureMode),
 		IMGPROXY_WIX_ALLOW_TH.Parse(&c.AllowWrongTileHeight),
+		IMGPROXY_WIX_ALLOW_VIPS.Parse(&c.AllowUnverifiedLibvips),
 	)
 }
 
