@@ -1,0 +1,23 @@
+Configurable sequential line-cache tile height in reducev.
+
+reducev wraps a sequential input in a line cache whose tile_height sets the
+strip height. Y accumulates within a strip and restarts at each boundary, so
+the strip height decides which output rows land exactly on a phase tie and
+which land a ULP below it. libvips uses 10; reproducing the Wix CDN requires
+16.
+
+The value is read from VIPS_TILE_HEIGHT at runtime and defaults to the
+upstream 10, so an unpatched-looking build results when the variable is unset.
+
+--- a/libvips/resample/reducev.cpp
++++ b/libvips/resample/reducev.cpp
+@@ -1026,7 +1026,8 @@
+ 		g_info("reducev sequential line cache");
+ 
+ 		if (vips_sequential(in, &t[4],
+-				"tile_height", 10,
++				"tile_height", g_getenv("VIPS_TILE_HEIGHT") ?
++					atoi(g_getenv("VIPS_TILE_HEIGHT")) : 10,
+ 				// "trace", TRUE,
+ 				nullptr))
+ 			return -1;

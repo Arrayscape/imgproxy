@@ -14,6 +14,7 @@ import (
 	landinghandler "github.com/imgproxy/imgproxy/v4/handlers/landing"
 	processinghandler "github.com/imgproxy/imgproxy/v4/handlers/processing"
 	streamhandler "github.com/imgproxy/imgproxy/v4/handlers/stream"
+	wixhandler "github.com/imgproxy/imgproxy/v4/handlers/wix"
 	"github.com/imgproxy/imgproxy/v4/httpheaders/conditionalheaders"
 	"github.com/imgproxy/imgproxy/v4/imagedata"
 	"github.com/imgproxy/imgproxy/v4/memory"
@@ -37,6 +38,7 @@ type ImgproxyHandlers struct {
 	Landing    *landinghandler.Handler
 	Processing *processinghandler.Handler
 	Stream     *streamhandler.Handler
+	Wix        *wixhandler.Handler
 }
 
 // Imgproxy holds all the components needed for imgproxy to function.
@@ -155,6 +157,11 @@ func New(ctx context.Context, config *Config) (*Imgproxy, error) {
 		return nil, err
 	}
 
+	imgproxy.handlers.Wix, err = wixhandler.New(imgproxy, &config.Handlers.Wix)
+	if err != nil {
+		return nil, err
+	}
+
 	return imgproxy, nil
 }
 
@@ -174,6 +181,16 @@ func (i *Imgproxy) BuildRouter() (*server.Router, error) {
 
 	if i.config.Server.HealthCheckPath != "" {
 		r.GET(i.config.Server.HealthCheckPath, i.handlers.Health.Execute).Silent()
+	}
+
+	// The Wix grammar mounts on its own prefix. Prefix routes are matched in
+	// registration order after all exact ones, so this must be registered
+	// before the catch-all below or it would never be reached.
+	if i.config.Handlers.Wix.Enabled {
+		r.GET(
+			i.config.Handlers.Wix.PathPrefix+"/*", i.handlers.Wix.Execute,
+			r.WithSecret, r.WithCORS, r.WithPanic, r.WithReportError, r.WithMonitoring,
+		)
 	}
 
 	r.GET(

@@ -9,6 +9,7 @@ import (
 	"github.com/imgproxy/imgproxy/v4/fetcher"
 	processinghandler "github.com/imgproxy/imgproxy/v4/handlers/processing"
 	streamhandler "github.com/imgproxy/imgproxy/v4/handlers/stream"
+	wixhandler "github.com/imgproxy/imgproxy/v4/handlers/wix"
 	"github.com/imgproxy/imgproxy/v4/httpheaders/conditionalheaders"
 	"github.com/imgproxy/imgproxy/v4/monitoring"
 	"github.com/imgproxy/imgproxy/v4/monitoring/prometheus"
@@ -23,6 +24,7 @@ import (
 type HandlerConfigs struct {
 	Processing processinghandler.Config
 	Stream     streamhandler.Config
+	Wix        wixhandler.Config
 }
 
 // Config represents an instance configuration
@@ -54,6 +56,7 @@ func NewDefaultConfig() Config {
 		Handlers: HandlerConfigs{
 			Processing: processinghandler.NewDefaultConfig(),
 			Stream:     streamhandler.NewDefaultConfig(),
+			Wix:        wixhandler.NewDefaultConfig(),
 		},
 		Server:             server.NewDefaultConfig(),
 		Security:           security.NewDefaultConfig(),
@@ -97,6 +100,10 @@ func LoadConfigFromEnv(c *Config) (*Config, error) {
 	}
 
 	if _, err = processinghandler.LoadConfigFromEnv(&c.Handlers.Processing); err != nil {
+		return nil, err
+	}
+
+	if _, err = wixhandler.LoadConfigFromEnv(&c.Handlers.Wix); err != nil {
 		return nil, err
 	}
 

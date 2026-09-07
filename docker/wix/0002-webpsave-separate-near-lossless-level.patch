@@ -1,0 +1,52 @@
+webpsave: separate the near-lossless level from Q.
+
+libwebp treats near_lossless and quality as independent knobs; libvips drives
+both from its single Q property, so near_lossless=80 with quality=75 -- what
+the Wix CDN emits for lossless webp -- cannot be expressed. Requesting --Q 80
+also sets quality=80 and the VP8L payload lands one byte short.
+
+Adds an optional near_lossless_level property. When >= 0 it sets
+config.near_lossless directly and leaves config.quality on Q. The default of
+-1 preserves existing behaviour exactly.
+
+Usage:  vips webpsave in.png out.webp --lossless --near-lossless \
+            --near-lossless-level 80 --Q 75
+
+--- a/libvips/foreign/webpsave.c
++++ b/libvips/foreign/webpsave.c
+@@ -123,6 +123,11 @@
+ 	/* Use preprocessing in lossless mode.
+ 	 */
+ 	gboolean near_lossless;
++
++	/* Near-lossless level, independent of Q. -1 means "use Q", which is
++	 * the historical behaviour.
++	 */
++	int near_lossless_level;
+ 
+ 	/* Alpha quality.
+ 	 */
+@@ -598,7 +603,8 @@
+ 	if (webp->lossless)
+ 		webp->config.quality = webp->Q;
+ 	if (webp->near_lossless)
+-		webp->config.near_lossless = webp->Q;
++		webp->config.near_lossless = webp->near_lossless_level >= 0 ?
++			webp->near_lossless_level : webp->Q;
+ 	if (webp->smart_subsample)
+ 		webp->config.use_sharp_yuv = 1;
+ 
+@@ -835,6 +841,13 @@
+ 		G_STRUCT_OFFSET(VipsForeignSaveWebp, near_lossless),
+ 		FALSE);
+ 
++	VIPS_ARG_INT(class, "near_lossless_level", 23,
++		_("Near lossless level"),
++		_("Near-lossless level, independent of Q; -1 uses Q"),
++		VIPS_ARGUMENT_OPTIONAL_INPUT,
++		G_STRUCT_OFFSET(VipsForeignSaveWebp, near_lossless_level),
++		-1, 100, -1);
++
+ 	VIPS_ARG_INT(class, "alpha_q", 15,
+ 		_("Alpha quality"),
+ 		_("Change alpha plane fidelity for lossy compression"),
