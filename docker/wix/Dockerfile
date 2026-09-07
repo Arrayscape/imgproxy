@@ -22,7 +22,20 @@
 #
 #   docker build -f docker/wix/Dockerfile -t ghcr.io/arrayscape/imgproxy-base-wix:local .
 
-FROM debian:bookworm
+# The Debian release is a deliberate pin, not an accident. OP-SPEC.md §1 pins
+# the libvips build, but the distro decides what that build links against, and
+# two of those libraries land directly on what we are reproducing:
+#
+#   zlib      1.2.13 (bookworm) -> 1.3.1 (trixie)   PNG IDAT *is* deflate output
+#   liblcms2  2.14   (bookworm) -> 2.16   (trixie)  does the ICC transform
+#
+# bookworm is what the 1341/1341 corpus was measured on. Moving to trixie is a
+# re-verification job, not a version bump: build both, render the corpus,
+# compare. Note trixie's 64-bit time_t transition also renames packages
+# (libglib2.0-0t64 etc), so the apt list below needs work as well.
+ARG DEBIAN_RELEASE=bookworm
+
+FROM debian:${DEBIAN_RELEASE}
 
 ARG VIPS_VERSION=8.15.5
 ARG GO_VERSION=1.26.6

@@ -11,6 +11,11 @@
 ARG BASE_IMAGE="ghcr.io/arrayscape/imgproxy-base-wix"
 ARG BASE_IMAGE_VERSION="v4.1.5-vips8.15.5-wix1"
 
+# Must match the release docker/wix/Dockerfile built the base on: the runtime
+# image supplies the shared libraries that build linked against, so the soname
+# versions have to line up. See the pin rationale in docker/wix/Dockerfile.
+ARG DEBIAN_RELEASE=bookworm
+
 FROM ${BASE_IMAGE}:${BASE_IMAGE_VERSION} AS build
 
 ENV CGO_ENABLED=1
@@ -38,12 +43,12 @@ FROM public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1 AS lambda-adapter
 # ==================================================================================================
 # Final image
 
-# debian:bookworm-slim rather than ubuntu:noble, because our libvips is built
-# against bookworm's shared libraries (docker/wix/Dockerfile) and links them
-# from the distro rather than vendoring them under /opt/imgproxy/lib the way
-# upstream's base does. Matching the distro guarantees the soname versions the
-# build linked against are the ones present at runtime.
-FROM debian:bookworm-slim
+# Debian rather than ubuntu:noble, because our libvips is built against Debian's
+# shared libraries (docker/wix/Dockerfile) and links them from the distro rather
+# than vendoring them under /opt/imgproxy/lib the way upstream's base does.
+# Matching the distro guarantees the soname versions the build linked against
+# are the ones present at runtime.
+FROM debian:${DEBIAN_RELEASE}-slim
 LABEL maintainer="Sergey Alexandrovich <darthsim@gmail.com>"
 
 # The runtime counterparts of the -dev packages docker/wix/Dockerfile builds
