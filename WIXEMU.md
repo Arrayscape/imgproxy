@@ -224,17 +224,64 @@ rather than measured:
 | §3.7 `quality_auto` | **parsed but inert** |
 | §4 format negotiation | implemented, all rows verified |
 | §5 WebP codec selection | implemented |
-| **§6 cache-derived renditions** | **not implemented** — see below |
+| §6 cache-derived renditions | implemented, **off by default** — see below |
 | §7.1 renditions stripped | implemented |
 | §7.2 originals not stripped | implemented, deliberately |
 | §7.3 colour → Wix sRGB | implemented |
 
-## 10. Not implemented
+## 10. Cache-derived renditions (§6 / OP-SPEC §10)
 
-**Cache-derived renditions.** The CDN caches transformed output and uses it as
-the input to later transforms, which is how roughly half of a mature URL set is
-produced. This fork always renders from the master. That is the well-defined
-function, and it is the one that is byte-exact; which ancestor the CDN picks
-depends on node-local cache state at the moment an entry was first created and
-is not reproducible in principle. A derivation cache is planned behind a flag,
-defaulting off.
+The CDN caches transformed output and uses it as the input to later transforms,
+which is how roughly half of a mature URL set is produced. This fork does the
+same, **off by default**:
+
+```
+IMGPROXY_WIX_DERIVATION_CACHE=true
+IMGPROXY_WIX_DERIVATION_CACHE_SIZE=536870912   # bytes, in-process
+IMGPROXY_WIX_DERIVATION_MAX_DEPTH=1            # derive only from a master render
+```
+
+Off by default because **deriving deliberately changes output bytes**, and the
+master path is the one measured byte-exact against the CDN. With it off, nothing
+is ever served from a rendition — there is a test asserting exactly that.
+
+**Which ancestor gets used is our policy, not the CDN's.** The CDN's choice
+depends on node-local cache state at the moment an entry was first created:
+adjacent widths one pixel apart resolve differently, and once created an entry
+is frozen and shared. That is not reproducible in principle, so we define a
+policy that is a pure function of the request and the cache contents. An entry
+is usable only if **all** of:
+
+1. it has no effects baked in — a sharpened or blurred rendition is not a
+   resamplable source;
+2. it is PNG — deriving from a lossy re-encode compounds artefacts;
+3. **its source rectangle contains the region the new request reads.** OP-SPEC
+   §10 suggests "smallest rendition at least as large as the target", but that
+   alone is unsound: two `fill`s of different aspect ratios can both be larger
+   while covering disjoint parts of the master. This is the missing predicate;
+4. it is at least as large as the target on both axes — never upsample from a
+   rendition, the master still has the detail;
+5. its derivation depth is under the cap.
+
+Among those, the smallest by area wins, ties broken on the source rectangle so
+the choice does not depend on insertion order or map iteration.
+
+Responses carry `X-Wix-Source: master | derived | cache` so which input produced
+them is observable from outside.
+
+**The `pHYs` marker is reproduced deliberately.** §6.1 notes that a derived
+rendition reads `pHYs 1000` because the intermediate lost its resolution in a
+write/re-read cycle. Our cached intermediates are complete PNGs and *do* carry
+resolution through, so this does not happen by itself — the resolution is reset
+explicitly on the derived render. Without it, derived output would be
+indistinguishable from a master render from outside.
+
+## 11. Not implemented
+
+**A persistent rendition cache.** The derivation cache in §10 is in-process
+only, so it is empty after a restart and not shared between replicas. An
+on-disk or shared store would make derivation actually common the way it is on
+the CDN; the `wixcache.Store` interface exists for that.
+
+**`quality_auto`.** Parsed and ignored — see §2. The spec establishes that only
+`auto` vs not-`auto` matters, but never what `auto` changes.

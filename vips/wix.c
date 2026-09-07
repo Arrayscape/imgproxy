@@ -55,6 +55,12 @@ vips_gaussblur_wix(VipsImage *in, VipsImage **out, double sigma)
 }
 
 int
+vips_reset_resolution_wix(VipsImage *in, VipsImage **out)
+{
+  return vips_copy(in, out, "xres", 1.0, "yres", 1.0, NULL);
+}
+
+int
 vips_pngsave_wix(VipsImage *in, VipsTarget *target)
 {
   // Every property at its libvips default: compression 6, filter NONE,

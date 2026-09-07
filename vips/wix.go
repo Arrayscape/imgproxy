@@ -104,6 +104,17 @@ func (img *Image) HasEmbeddedICC() bool {
 	return C.vips_has_embedded_icc(img.VipsImage) != 0
 }
 
+// WixResetResolution drops the image's resolution back to libvips' default, so
+// PNG output carries pHYs 1000. See vips/wix.h.
+func (img *Image) WixResetResolution() error {
+	var tmp *C.VipsImage
+	if C.vips_reset_resolution_wix(img.VipsImage, &tmp) != 0 {
+		return Error()
+	}
+	img.swapAndUnref(tmp)
+	return nil
+}
+
 // IsSequential reports whether the pipeline still carries VIPS_META_SEQUENTIAL.
 //
 // That hint is what makes the patched reducev install a line cache sized from

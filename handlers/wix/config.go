@@ -7,6 +7,7 @@ import (
 
 	"github.com/imgproxy/imgproxy/v4/ensure"
 	"github.com/imgproxy/imgproxy/v4/env"
+	"github.com/imgproxy/imgproxy/v4/wixcache"
 )
 
 var (
@@ -19,6 +20,9 @@ var (
 	IMGPROXY_WIX_SIG_MODE    = env.String("IMGPROXY_WIX_SIGNATURE_MODE")
 	IMGPROXY_WIX_ALLOW_TH    = env.Bool("IMGPROXY_WIX_ALLOW_WRONG_TILE_HEIGHT")
 	IMGPROXY_WIX_ALLOW_VIPS  = env.Bool("IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS")
+	IMGPROXY_WIX_DERIVE      = env.Bool("IMGPROXY_WIX_DERIVATION_CACHE")
+	IMGPROXY_WIX_DERIVE_SIZE = env.Int("IMGPROXY_WIX_DERIVATION_CACHE_SIZE")
+	IMGPROXY_WIX_DERIVE_DEPT = env.Int("IMGPROXY_WIX_DERIVATION_MAX_DEPTH")
 )
 
 // Signature modes.
@@ -70,6 +74,20 @@ type Config struct {
 	// patched 8.15.5 the transform is defined against -- for instance an
 	// unmodified upstream imgproxy base. Output will not reproduce the CDN.
 	AllowUnverifiedLibvips bool
+
+	// DerivationCache reproduces the CDN behaviour where a rendition is
+	// rendered from a previously cached rendition rather than the master
+	// (OP-SPEC §10). OFF by default: deriving deliberately changes output
+	// bytes, and the master path is the one measured byte-exact.
+	DerivationCache bool
+
+	// DerivationCacheSize bounds the in-process rendition cache, in bytes.
+	DerivationCacheSize int
+
+	// DerivationMaxDepth caps how many times output may be re-derived. The
+	// default of 1 derives only from a master render, never from a derived
+	// one, because quality degrades with every generation.
+	DerivationMaxDepth int
 }
 
 func NewDefaultConfig() Config {
@@ -81,6 +99,10 @@ func NewDefaultConfig() Config {
 		AVIF:              true,
 		AVIFSpeed:         8,
 		SignatureMode:     SignatureOff,
+
+		DerivationCache:     false,
+		DerivationCacheSize: 512 << 20,
+		DerivationMaxDepth:  wixcache.DefaultMaxDepth,
 	}
 }
 
@@ -97,6 +119,9 @@ func LoadConfigFromEnv(c *Config) (*Config, error) {
 		IMGPROXY_WIX_SIG_MODE.Parse(&c.SignatureMode),
 		IMGPROXY_WIX_ALLOW_TH.Parse(&c.AllowWrongTileHeight),
 		IMGPROXY_WIX_ALLOW_VIPS.Parse(&c.AllowUnverifiedLibvips),
+		IMGPROXY_WIX_DERIVE.Parse(&c.DerivationCache),
+		IMGPROXY_WIX_DERIVE_SIZE.Parse(&c.DerivationCacheSize),
+		IMGPROXY_WIX_DERIVE_DEPT.Parse(&c.DerivationMaxDepth),
 	)
 }
 
@@ -126,6 +151,18 @@ func (c *Config) Validate() error {
 	}
 	if c.AVIFSpeed < 0 || c.AVIFSpeed > 9 {
 		return fmt.Errorf("IMGPROXY_WIX_AVIF_SPEED must be 0-9, got %d", c.AVIFSpeed)
+	}
+	if c.DerivationCache {
+		if c.DerivationCacheSize <= 0 {
+			return fmt.Errorf(
+				"IMGPROXY_WIX_DERIVATION_CACHE_SIZE must be positive, got %d",
+				c.DerivationCacheSize)
+		}
+		if c.DerivationMaxDepth < 1 {
+			return fmt.Errorf(
+				"IMGPROXY_WIX_DERIVATION_MAX_DEPTH must be at least 1, got %d",
+				c.DerivationMaxDepth)
+		}
 	}
 	return nil
 }

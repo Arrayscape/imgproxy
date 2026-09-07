@@ -40,6 +40,12 @@ int vips_sharpen_wix(VipsImage *in, VipsImage **out,
 
 int vips_gaussblur_wix(VipsImage *in, VipsImage **out, double sigma);
 
+// Reset the image resolution to libvips' default (1 pixel/mm), which pngsave
+// writes as pHYs 1000. Models the resolution being lost in an intermediate's
+// write/re-read cycle -- the marker that distinguishes a derived rendition
+// from a master render (WIX-URL-SPEC §6.1).
+int vips_reset_resolution_wix(VipsImage *in, VipsImage **out);
+
 // Encoders. libvips/CLI defaults only -- see the note on vips_pngsave_go above.
 int vips_pngsave_wix(VipsImage *in, VipsTarget *target);
 int vips_webpsave_wix(VipsImage *in, VipsTarget *target,
