@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/imgproxy/imgproxy/v4/testutil/servertest"
+	wixspec "github.com/imgproxy/imgproxy/v4/wix"
 )
 
 // Media ids for the generated masters. The extension is deliberately part of
@@ -26,6 +27,7 @@ const (
 	wixRGBA  = "0a7ba9_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb~mv2.png"
 	wixJPEG  = "0a7ba9_cccccccccccccccccccccccccccccccc~mv2.jpg"
 	wixLeaky = "0a7ba9_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee~mv2.png"
+	wixICC   = "0a7ba9_ffffffffffffffffffffffffffffffff~mv2.png"
 )
 
 // The masters are 512x392 -- an EVEN source dimension on both axes, which is
@@ -39,7 +41,8 @@ const (
 type WixHandlerTestSuite struct {
 	servertest.Suite
 
-	masters string
+	masters       string
+	masterProfile []byte
 }
 
 func (s *WixHandlerTestSuite) SetupSuite() {
@@ -53,6 +56,14 @@ func (s *WixHandlerTestSuite) SetupSuite() {
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixRGBA), gradientPNG(true), 0o644))
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixJPEG), gradientJPEG(), 0o644))
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixLeaky), leakyPNG(), 0o644))
+
+	// A master carrying an ICC profile that is NOT Wix's, so a missing
+	// icc_transform is detectable in the output's iCCP chunk.
+	prof, err := os.ReadFile("testdata/adobergb-test.icc")
+	s.Require().NoError(err)
+	s.masterProfile = prof
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixICC),
+		withICCProfile(gradientPNG(false), prof), 0o644))
 }
 
 func (s *WixHandlerTestSuite) TearDownSuite() {
@@ -370,6 +381,46 @@ func (s *WixHandlerTestSuite) TestRouteIsOffByDefault() {
 	defer res.Body.Close()
 	// Falls through to the native grammar, which cannot parse this path.
 	s.NotEqual(http.StatusOK, res.StatusCode)
+}
+
+func (s *WixHandlerTestSuite) TestProfiledMasterIsConvertedToWixSRGB() {
+	// OP-SPEC §3: a profiled master is converted to Wix's own sRGB, which is
+	// NOT libvips' built-in. Skipping it leaves the master's profile in iCCP --
+	// pixels match and bytes do not.
+	wixProfile, err := wixspec.SRGBProfile()
+	s.Require().NoError(err)
+
+	code, _, body := s.get(wixICC + "/v1/fit/w_200,h_200/x.png")
+	s.Require().Equal(http.StatusOK, code)
+
+	got, ok := iccpProfile(body)
+	s.Require().True(ok, "a profiled master must produce a profiled rendition")
+	s.Equal(wixProfile, got, "output must carry Wix's sRGB, not the master's profile")
+	s.NotEqual(s.masterProfile, got)
+}
+
+func (s *WixHandlerTestSuite) TestBareCropIsAlsoColourConverted() {
+	// "This applies to EVERY operation, including a bare crop that does no
+	// resampling." The identity branch skips the resample entirely, so it is
+	// exactly where the colour transform is easiest to omit by accident.
+	wixProfile, err := wixspec.SRGBProfile()
+	s.Require().NoError(err)
+
+	code, _, body := s.get(wixICC + "/v1/crop/x_10,y_10,w_50,h_50/x.png")
+	s.Require().Equal(http.StatusOK, code)
+
+	got, ok := iccpProfile(body)
+	s.Require().True(ok)
+	s.Equal(wixProfile, got,
+		"a bare crop must still be converted; otherwise pixels match and bytes do not")
+}
+
+func (s *WixHandlerTestSuite) TestUnprofiledMasterIsLeftAlone() {
+	// "Skip entirely when the master has no embedded profile."
+	code, _, body := s.get(wixRGB + "/v1/fit/w_200,h_200/x.png")
+	s.Require().Equal(http.StatusOK, code)
+	_, ok := iccpProfile(body)
+	s.False(ok, "an unprofiled master must not gain a profile")
 }
 
 func TestWixHandler(t *testing.T) {

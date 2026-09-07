@@ -301,9 +301,11 @@ func (h *Handler) render(
 			}
 
 			if anc := wixcache.SelectAncestor(
-				h.cache.Ancestors(r.MediaID), plan, h.config.DerivationMaxDepth,
+				h.cache.Ancestors(r.MediaID), plan, h.config.DerivationMaxDepth, mw, mh,
 			); anc != nil {
-				if data, src, derr := h.deriveFrom(anc, plan, fx, enc, out, lossy, key, r.MediaID); derr == nil {
+				if data, src, derr := h.deriveFrom(
+					anc, r.Segments, plan, fx, enc, out, lossy, key, r.MediaID,
+				); derr == nil {
 					return data, src, nil
 				}
 				// Any failure deriving falls through to the master, which is
@@ -372,6 +374,7 @@ func (h *Handler) renderFromMaster(
 // derived renditions carry (WIX-URL-SPEC §6.1).
 func (h *Handler) deriveFrom(
 	anc *wixcache.Entry,
+	segs []wixspec.Segment,
 	plan wixspec.Plan,
 	fx wixspec.Effects,
 	enc wixspec.Encoding,
@@ -379,9 +382,12 @@ func (h *Handler) deriveFrom(
 	lossy bool,
 	key, mediaID string,
 ) (imagedata.ImageData, string, error) {
-	rebased, ok := wixcache.Rebase(plan, anc)
+	// The ancestor IS the source: the segments are resolved against its
+	// dimensions exactly as if it were the master. "The pipeline is identical;
+	// only the input differs" (OP-SPEC §10).
+	replanned, ok := wixcache.Replan(segs, anc)
 	if !ok {
-		return nil, "", errors.New("wix: cannot rebase onto the cached ancestor")
+		return nil, "", errors.New("wix: cannot replan against the cached ancestor")
 	}
 
 	ancData := imagedata.NewFromBytesWithFormat(anc.Format, anc.Data)
@@ -397,17 +403,30 @@ func (h *Handler) deriveFrom(
 	// The codec choice follows the ORIGINAL master, not the intermediate.
 	src.Lossy = lossy
 
-	// The CDN's derived renditions read pHYs 1000 because the intermediate lost
-	// its resolution in the write/re-read cycle (WIX-URL-SPEC §6.1). Our cached
-	// intermediates are complete PNGs and DO carry resolution through, so the
-	// marker is reproduced deliberately here rather than arriving for free.
-	// It matters: it is how a derived rendition is told apart from a master
-	// render, and the corpus scorer excludes derived rows on exactly this.
+	// The CDN's cached intermediates carry no metadata and no resolution: a
+	// derived rendition reads pHYs 1000 precisely because the resolution was
+	// lost in the write/re-read cycle (WIX-URL-SPEC §6.1).
+	//
+	// Ours are complete PNGs, so without this the ancestor's metadata would
+	// travel into the derived rendition and diverge from the CDN in two ways at
+	// once -- pHYs would keep the master's 2834, and the canonical EXIF's
+	// XResolution would be derived from the ANCESTOR's eXIf rather than from
+	// this rendition's own pHYs. Both are bugs, not cosmetic differences.
+	//
+	// Order matters: Strip rewrites xres/yres to 72dpi, so the resolution reset
+	// has to come after it.
+	if err := img.Strip(false); err != nil {
+		return nil, "", err
+	}
 	if err := img.WixResetResolution(); err != nil {
 		return nil, "", err
 	}
+	// The PNG container fix-ups take the master's resolution from this head.
+	// An intermediate has none, so the derived rendition must fall through to
+	// deriving it from its own pHYs.
+	src.Head = nil
 
-	if err := procwix.Render(img, src, rebased, fx, h.profilePath); err != nil {
+	if err := procwix.Render(img, src, replanned, fx, h.profilePath); err != nil {
 		return nil, "", err
 	}
 

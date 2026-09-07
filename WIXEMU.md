@@ -196,6 +196,15 @@ rather than measured:
 - **`fp_<x>_<y>`** other than `0.50_0.50`. Whether `fp`'s presence changes the
   rounding the way `al`'s does is untested.
 - **`al` non-centre anchors** — behaviour observed, never scored.
+- **Everything about derived renditions.** Nothing in §10 has been scored
+  against CDN output: the corpus deliberately excludes cache-derived rows,
+  because which ancestor the CDN picked is not reproducible. The rules are
+  implemented as specified, but "given the ancestor, the output is byte-exact"
+  is a claim the specs make about the CDN, not one this fork has verified about
+  itself. The one part that *is* measured is the marker: a cache-derived
+  rendition carries `pHYs 1000` and EXIF XResolution `25400/1000`, confirmed on
+  1307 of 1307 such renditions, and this fork reproduces both.
+
 - **Chains beyond `crop* -> fit|fill`.** The grammar composes freely and this
   implementation composes the general form: each segment is computed against
   the previous segment's *output*, and its crop window is mapped back into
@@ -227,7 +236,7 @@ rather than measured:
 | §6 cache-derived renditions | implemented, **off by default** — see below |
 | §7.1 renditions stripped | implemented |
 | §7.2 originals not stripped | implemented, deliberately |
-| §7.3 colour → Wix sRGB | implemented |
+| §7.3 colour → Wix sRGB | implemented, including on a bare `crop` |
 
 ## 10. Cache-derived renditions (§6 / OP-SPEC §10)
 
@@ -245,6 +254,13 @@ Off by default because **deriving deliberately changes output bytes**, and the
 master path is the one measured byte-exact against the CDN. With it off, nothing
 is ever served from a rendition — there is a test asserting exactly that.
 
+**The ancestor is the source.** Both specs say "the pipeline is identical; only
+the input differs" and "run through the same pipeline", so the URL's segments
+are resolved against the ancestor's dimensions exactly as if it were the master
+— not mapped from a master-relative plan into ancestor coordinates. That
+distinction is not academic: the two disagreed on 38% of sampled cases, with
+different scales, different drop counts and crops a pixel wider.
+
 **Which ancestor gets used is our policy, not the CDN's.** The CDN's choice
 depends on node-local cache state at the moment an entry was first created:
 adjacent widths one pixel apart resolve differently, and once created an entry
@@ -261,7 +277,11 @@ is usable only if **all** of:
    while covering disjoint parts of the master. This is the missing predicate;
 4. it is at least as large as the target on both axes — never upsample from a
    rendition, the master still has the detail;
-5. its derivation depth is under the cap.
+5. its derivation depth is under the cap;
+6. it covers the whole master. Since the ancestor is treated as the source, a
+   cropped ancestor would re-frame every later transform against the crop
+   rather than the master. Whether the CDN does that is unmeasured, so it is
+   refused rather than guessed at.
 
 Among those, the smallest by area wins, ties broken on the source rectangle so
 the choice does not depend on insertion order or map iteration.
@@ -269,12 +289,17 @@ the choice does not depend on insertion order or map iteration.
 Responses carry `X-Wix-Source: master | derived | cache` so which input produced
 them is observable from outside.
 
-**The `pHYs` marker is reproduced deliberately.** §6.1 notes that a derived
-rendition reads `pHYs 1000` because the intermediate lost its resolution in a
-write/re-read cycle. Our cached intermediates are complete PNGs and *do* carry
-resolution through, so this does not happen by itself — the resolution is reset
-explicitly on the derived render. Without it, derived output would be
-indistinguishable from a master render from outside.
+**Cached intermediates are stripped before being used as a source.** §6.1 notes
+that a derived rendition reads `pHYs 1000` because the intermediate lost its
+resolution in a write/re-read cycle. The CDN's intermediates carry no metadata
+at all; ours are complete PNGs, so an ancestor's metadata would otherwise travel
+into the derived rendition and diverge in two ways at once — `pHYs` would keep
+the master's value, *and* the canonical EXIF's `XResolution` would be derived
+from the ancestor's `eXIf` instead of from the rendition's own `pHYs`. Both are
+bugs. The ancestor is therefore stripped and its resolution reset at read-back,
+so a derived rendition carries `pHYs 1000` and an `XResolution` of `25400/1000`
+derived from it, per §8.3 step 3 — which is what the CDN emits, measured on
+1307 of 1307 cache-derived renditions. The master path is unaffected.
 
 ## 11. Not implemented
 

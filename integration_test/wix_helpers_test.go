@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
+	"hash/crc32"
+	"io"
 	"strconv"
 )
 
@@ -87,3 +89,63 @@ func zlibDeflate(s string) []byte {
 }
 
 func itoa(i int) string { return strconv.Itoa(i) }
+
+// iccpProfile returns the decompressed ICC profile from a PNG's iCCP chunk.
+func iccpProfile(b []byte) ([]byte, bool) {
+	chunks, _ := splitPNGChunks(b)
+	for _, c := range chunks {
+		if c.typ != "iCCP" {
+			continue
+		}
+		// name \0 compression-method compressed-profile
+		i := bytes.IndexByte(c.data, 0)
+		if i < 0 || i+2 > len(c.data) {
+			return nil, false
+		}
+		zr, err := zlib.NewReader(bytes.NewReader(c.data[i+2:]))
+		if err != nil {
+			return nil, false
+		}
+		defer zr.Close()
+		out, err := io.ReadAll(zr)
+		if err != nil {
+			return nil, false
+		}
+		return out, true
+	}
+	return nil, false
+}
+
+// withICCProfile injects an iCCP chunk into a PNG, after IHDR.
+func withICCProfile(pngBytes, profile []byte) []byte {
+	var comp bytes.Buffer
+	zw := zlib.NewWriter(&comp)
+	_, _ = zw.Write(profile)
+	_ = zw.Close()
+
+	payload := append([]byte("test\x00\x00"), comp.Bytes()...)
+
+	chunks, _ := splitPNGChunks(pngBytes)
+	var out bytes.Buffer
+	out.Write([]byte("\x89PNG\r\n\x1a\n"))
+	write := func(typ string, data []byte) {
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(data)))
+		out.Write(n[:])
+		out.WriteString(typ)
+		out.Write(data)
+		h := crc32.NewIEEE()
+		h.Write([]byte(typ))
+		h.Write(data)
+		var s [4]byte
+		binary.BigEndian.PutUint32(s[:], h.Sum32())
+		out.Write(s[:])
+	}
+	for _, c := range chunks {
+		write(c.typ, c.data)
+		if c.typ == "IHDR" {
+			write("iCCP", payload)
+		}
+	}
+	return out.Bytes()
+}

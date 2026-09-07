@@ -184,6 +184,55 @@ func (s *WixCacheTestSuite) TestNeverDerivesAcrossDisjointCrops() {
 		"an ancestor covering a disjoint region must never be used")
 }
 
+// exifXResolution reads XResolution out of a rendition's canonical eXIf block.
+// IFD0 entry index 1 is XResolution, a RATIONAL whose value field is an offset.
+func exifXResolution(b []byte) (num, den uint32, ok bool) {
+	_, exif := pngChunks(b)
+	if len(exif) < 100 {
+		return 0, 0, false
+	}
+	off := binary.LittleEndian.Uint32(exif[10+1*12+8 : 10+1*12+12])
+	if int(off)+8 > len(exif) {
+		return 0, 0, false
+	}
+	return binary.LittleEndian.Uint32(exif[off : off+4]),
+		binary.LittleEndian.Uint32(exif[off+4 : off+8]), true
+}
+
+func (s *WixCacheTestSuite) TestDerivedRenditionCarriesNoAncestorMetadata() {
+	// The CDN's cached intermediates carry no metadata and no resolution. Ours
+	// are complete PNGs, so without explicitly stripping them the ancestor's
+	// metadata travels into the derived rendition -- and it does so invisibly:
+	// pHYs keeps the master's value AND the canonical EXIF's XResolution gets
+	// derived from the ancestor's eXIf instead of from this rendition's own
+	// pHYs. Both are divergences from the CDN, not cosmetic differences.
+	s.derive = true
+	s.ResetLazyObjects()
+	s.configure()
+
+	master, o1 := s.fetch(wixRGB + "/v1/fit/w_400,h_400/x.png")
+	derived, o2 := s.fetch(wixRGB + "/v1/fit/w_100,h_100/x.png")
+	s.Require().Equal("master", o1)
+	s.Require().Equal("derived", o2)
+
+	mNum, mDen, ok := exifXResolution(master)
+	s.Require().True(ok)
+	dNum, dDen, ok := exifXResolution(derived)
+	s.Require().True(ok)
+
+	s.NotEqual(mNum, dNum,
+		"the derived rendition must not inherit the ancestor's EXIF resolution")
+
+	// With no master resolution to carry, §8.3 falls through to deriving it
+	// from the rendition's own pHYs, TRUNCATED: int(1000 * 0.0254 * 1000).
+	s.Equal(uint32(25400), dNum)
+	s.Equal(uint32(1000), dDen)
+
+	// And the master path is unaffected: 2834 px/m -> int(2834*0.0254*1000).
+	s.Equal(uint32(71983), mNum)
+	s.Equal(uint32(1000), mDen)
+}
+
 func TestWixCache(t *testing.T) {
 	suite.Run(t, new(WixCacheTestSuite))
 }

@@ -31,46 +31,46 @@ func TestUsableRequiresContainment(t *testing.T) {
 	big := entry(image.Rect(0, 0, 1000, 1000), 800, 800, 0)
 
 	inside := target(100, 100, 200, 200, 100, 100)
-	require.True(t, Usable(big, inside, DefaultMaxDepth))
+	require.True(t, Usable(big, inside, DefaultMaxDepth, 1000, 1000))
 
 	// Same output size, but reads a region the ancestor never covered.
 	outside := target(900, 900, 200, 200, 100, 100)
-	require.False(t, Usable(big, outside, DefaultMaxDepth),
+	require.False(t, Usable(big, outside, DefaultMaxDepth, 1000, 1000),
 		"an ancestor that does not contain the target region must be rejected")
 
 	// Partially overlapping is still not containment.
 	partial := target(900, 0, 200, 200, 100, 100)
-	require.False(t, Usable(big, partial, DefaultMaxDepth))
+	require.False(t, Usable(big, partial, DefaultMaxDepth, 1000, 1000))
 }
 
 func TestUsableRejectsUnsuitableAncestors(t *testing.T) {
 	rect := image.Rect(0, 0, 1000, 1000)
 	tgt := target(0, 0, 1000, 1000, 100, 100)
 
-	require.True(t, Usable(entry(rect, 500, 500, 0), tgt, DefaultMaxDepth))
+	require.True(t, Usable(entry(rect, 500, 500, 0), tgt, DefaultMaxDepth, 1000, 1000))
 
 	// Effects are baked into the pixels.
 	sharp := entry(rect, 500, 500, 0)
 	sharp.Effects = wix.Effects{USM: &wix.USM{Sigma: 0.66, Amount: 1, Threshold: 0.01}}
-	require.False(t, Usable(sharp, tgt, DefaultMaxDepth), "a sharpened ancestor is not resamplable")
+	require.False(t, Usable(sharp, tgt, DefaultMaxDepth, 1000, 1000), "a sharpened ancestor is not resamplable")
 
 	blurred := entry(rect, 500, 500, 0)
 	blurred.Effects = wix.Effects{Blur: 3}
-	require.False(t, Usable(blurred, tgt, DefaultMaxDepth))
+	require.False(t, Usable(blurred, tgt, DefaultMaxDepth, 1000, 1000))
 
 	// Deriving from a lossy re-encode compounds artefacts.
 	lossy := entry(rect, 500, 500, 0)
 	lossy.Format = imagetype.WEBP
-	require.False(t, Usable(lossy, tgt, DefaultMaxDepth))
+	require.False(t, Usable(lossy, tgt, DefaultMaxDepth, 1000, 1000))
 
 	// Never upsample from a rendition; the master still has the detail.
 	tooSmall := entry(rect, 50, 50, 0)
-	require.False(t, Usable(tooSmall, tgt, DefaultMaxDepth))
+	require.False(t, Usable(tooSmall, tgt, DefaultMaxDepth, 1000, 1000))
 
 	// Depth: quality degrades with every generation.
-	require.False(t, Usable(entry(rect, 500, 500, 1), tgt, 1),
+	require.False(t, Usable(entry(rect, 500, 500, 1), tgt, 1, 1000, 1000),
 		"default depth 1 derives only from a master render")
-	require.True(t, Usable(entry(rect, 500, 500, 1), tgt, 2))
+	require.True(t, Usable(entry(rect, 500, 500, 1), tgt, 2, 1000, 1000))
 }
 
 func TestSelectAncestorPicksSmallestSufficient(t *testing.T) {
@@ -82,7 +82,7 @@ func TestSelectAncestorPicksSmallestSufficient(t *testing.T) {
 		entry(rect, 200, 200, 0), // smallest that still has enough detail
 		entry(rect, 600, 600, 0),
 		entry(rect, 50, 50, 0), // too small, rejected
-	}, tgt, DefaultMaxDepth)
+	}, tgt, DefaultMaxDepth, 1000, 1000)
 
 	require.NotNil(t, got)
 	require.Equal(t, 200, got.Width, "least work that still has the detail")
@@ -98,35 +98,43 @@ func TestSelectAncestorIsOrderIndependent(t *testing.T) {
 	b := entry(image.Rect(0, 0, 1000, 1000), 400, 400, 0)
 	b.SrcRect = rect
 
-	first := SelectAncestor([]*Entry{a, b}, tgt, DefaultMaxDepth)
-	second := SelectAncestor([]*Entry{b, a}, tgt, DefaultMaxDepth)
+	first := SelectAncestor([]*Entry{a, b}, tgt, DefaultMaxDepth, 1000, 1000)
+	second := SelectAncestor([]*Entry{b, a}, tgt, DefaultMaxDepth, 1000, 1000)
 	require.Equal(t, first.Width, second.Width)
 	require.Equal(t, first.SrcRect, second.SrcRect)
 }
 
-func TestRebaseMapsIntoTheAncestor(t *testing.T) {
-	// The ancestor is master rect (0,0)-(1000,1000) rendered at 500x500, so
-	// master coordinates halve.
-	anc := entry(image.Rect(0, 0, 1000, 1000), 500, 500, 0)
-	tgt := target(200, 400, 400, 400, 100, 100)
+func TestReplanTreatsTheAncestorAsTheSource(t *testing.T) {
+	// "The pipeline is identical; only the input differs" -- so the segments
+	// resolve against the ancestor's dimensions, not the master's.
+	anc := entry(image.Rect(0, 0, 1000, 1000), 400, 400, 0)
+	segs := []wix.Segment{{Op: wix.OpFit, Params: wix.Params{"w": "100", "h": "100"}}}
 
-	p, ok := Rebase(tgt, anc)
+	p, ok := Replan(segs, anc)
 	require.True(t, ok)
-	require.Equal(t, 100, p.NX, "200 master px -> 100 ancestor px")
-	require.Equal(t, 200, p.NY)
-	require.Equal(t, 200, p.HW)
-	require.Equal(t, 200, p.HH)
-	require.Equal(t, 100, p.W, "output size is unchanged by rebasing")
-	require.Equal(t, 100, p.H)
-	require.InDelta(t, 0.5, p.S, 1e-12)
+	require.Equal(t, 400, p.HW, "the whole ancestor is the source")
+	require.Equal(t, 400, p.HH)
+	require.Equal(t, 100, p.W)
+	require.InDelta(t, 0.25, p.S, 1e-12, "scale is relative to the ANCESTOR")
 }
 
-func TestRebaseRefusesToEnlarge(t *testing.T) {
-	// Deriving must never upsample a rendition, even if rounding lands a hair
-	// over: falling back to the master is always correct.
+func TestReplanRefusesToEnlarge(t *testing.T) {
 	anc := entry(image.Rect(0, 0, 1000, 1000), 100, 100, 0)
-	_, ok := Rebase(target(0, 0, 1000, 1000, 400, 400), anc)
-	require.False(t, ok)
+	segs := []wix.Segment{{Op: wix.OpFill, Params: wix.Params{"w": "400", "h": "400"}}}
+	_, ok := Replan(segs, anc)
+	require.False(t, ok, "falling back to the master is always correct")
+}
+
+func TestUsableRequiresAnUncroppedAncestor(t *testing.T) {
+	// Replan re-frames against the ancestor, so a cropped ancestor would apply
+	// every later transform to the crop rather than the master. Unmeasured, so
+	// refused.
+	tgt := target(0, 0, 1000, 1000, 100, 100)
+	cropped := entry(image.Rect(100, 100, 900, 900), 500, 500, 0)
+	require.False(t, Usable(cropped, tgt, DefaultMaxDepth, 1000, 1000))
+
+	full := entry(image.Rect(0, 0, 1000, 1000), 500, 500, 0)
+	require.True(t, Usable(full, tgt, DefaultMaxDepth, 1000, 1000))
 }
 
 func TestKeyIsStableAndDiscriminating(t *testing.T) {
