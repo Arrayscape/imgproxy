@@ -261,12 +261,40 @@ func (img *Image) Load(
 	shrink float64,
 	page, pages int,
 ) error {
+	return img.load(imgdata, C.VIPS_ACCESS_SEQUENTIAL, shrink, page, pages)
+}
+
+// LoadWithAccess is Load with an explicit access mode. The Wix pipeline needs
+// VIPS_ACCESS_RANDOM (OP-SPEC §2); everything else uses SEQUENTIAL.
+//
+// The mode is a parameter rather than package state on purpose: a global would
+// be read by concurrent loads on other goroutines, so a native request could
+// silently pick up random access -- or a Wix one lose it -- under traffic.
+func (img *Image) LoadWithAccess(
+	imgdata imagedata.ImageData,
+	random bool,
+	shrink float64,
+	page, pages int,
+) error {
+	access := C.VipsAccess(C.VIPS_ACCESS_SEQUENTIAL)
+	if random {
+		access = C.VIPS_ACCESS_RANDOM
+	}
+	return img.load(imgdata, access, shrink, page, pages)
+}
+
+func (img *Image) load(
+	imgdata imagedata.ImageData,
+	access C.VipsAccess,
+	shrink float64,
+	page, pages int,
+) error {
 	var tmp *C.VipsImage
 
 	source := newVipsImgproxySource(imgdata.Reader())
 	defer C.unref_imgproxy_source(source)
 
-	lo := newLoadOptionsAccess(loadAccess(imgdata), shrink, page, pages)
+	lo := newLoadOptionsAccess(access, shrink, page, pages)
 
 	err := C.int(0) //nolint:wastedassign
 

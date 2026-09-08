@@ -388,6 +388,56 @@ func (s *WixHandlerTestSuite) TestJPEGDoesNotLeakMasterMetadata() {
 	s.Len(exif, 186, "only the canonical block survives")
 }
 
+func (s *WixHandlerTestSuite) TestAVIFIsEncodedByLibavif() {
+	// OP-SPEC §7.5. The CDN's AVIFs carry `hdlr` name "libavif" and libavif's
+	// own box layout, so libheif output would be the wrong encoder however it
+	// was tuned. This is the discriminator.
+	code, ct, body := s.get(wixRGB+"/v1/fit/w_100,h_100,enc_avif/x",
+		"image/avif,image/webp,*/*")
+	s.Require().Equal(http.StatusOK, code)
+	s.Require().Equal("image/avif", ct)
+
+	s.Equal([]string{"ftyp", "meta", "mdat"}, isobmffBoxes(body))
+	s.True(bytes.Contains(body, []byte("libavif")),
+		"the hdlr name identifies the encoder; libheif output would not carry it")
+	s.False(bytes.Contains(body, []byte("libheif")))
+}
+
+func (s *WixHandlerTestSuite) TestAVIFAlwaysCarriesAnAlphaItem() {
+	// A consequence of avifEncoderAddImage's flags being 0 rather than
+	// AVIF_ADD_IMAGE_FLAG_SINGLE: the flag would DROP a fully opaque alpha
+	// plane, and prod emits an alpha item on every rendition including ones
+	// whose master had no alpha at all.
+	for _, tc := range []struct{ name, id string }{
+		{"opaque jpeg master", wixJPEG},
+		{"opaque png master", wixRGB},
+		{"rgba master", wixRGBA},
+	} {
+		s.Run(tc.name, func() {
+			_, ct, body := s.get(tc.id+"/v1/fit/w_100,h_100,enc_avif/x",
+				"image/avif,image/webp,*/*")
+			s.Require().Equal("image/avif", ct)
+			s.Greater(bytes.Count(body, []byte("av01")), 1,
+				"a second av01 item is the alpha aux item")
+		})
+	}
+}
+
+func (s *WixHandlerTestSuite) TestAVIFQualitySelectsTheQuantizer() {
+	// q_N selects minQuantizer from the measured table, so a lower q must
+	// produce a visibly smaller file. A url with no q_ behaves as q_90.
+	size := func(params string) int {
+		_, ct, body := s.get(wixRGB+"/v1/fit/w_200,h_200,"+params+"/x",
+			"image/avif,image/webp,*/*")
+		s.Require().Equal("image/avif", ct)
+		return len(body)
+	}
+	q90, q50, q10 := size("enc_avif"), size("q_50,enc_avif"), size("q_10,enc_avif")
+
+	s.Greater(q90, q50, "q_50 quantises harder than the q_90 default")
+	s.Greater(q50, q10)
+}
+
 func (s *WixHandlerTestSuite) TestRenditionsDoNotLeakSourceMetadata() {
 	// OP-SPEC §8.2 calls this a security control: libvips forwards source
 	// metadata by default, so without the container fix-ups every rendition

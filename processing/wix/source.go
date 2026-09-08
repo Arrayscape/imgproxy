@@ -73,9 +73,7 @@ func NewSource(img *vips.Image, data imagedata.ImageData) (*Source, error) {
 	}
 	head = head[:n]
 
-	if err := vips.WithRandomAccess(func() error {
-		return img.Load(data, 1.0, 0, 1)
-	}); err != nil {
+	if err := img.LoadWithAccess(data, true, 1.0, 0, 1); err != nil {
 		return nil, fmt.Errorf("wix: cannot decode master: %w", err)
 	}
 

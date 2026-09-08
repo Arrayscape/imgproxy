@@ -182,3 +182,18 @@ func jpegHeader(t *testing.T, b []byte) (markers []byte, exif, icc []byte) {
 	}
 	return markers, exif, icc
 }
+
+// isobmffBoxes lists an ISOBMFF file's top-level box types.
+func isobmffBoxes(b []byte) []string {
+	var out []string
+	off := 0
+	for off+8 <= len(b) {
+		n := int(binary.BigEndian.Uint32(b[off : off+4]))
+		if n < 8 || off+n > len(b) {
+			break
+		}
+		out = append(out, string(b[off+4:off+8]))
+		off += n
+	}
+	return out
+}

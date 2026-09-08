@@ -60,12 +60,32 @@ func imgproxyReaderRead(handle C.uintptr_t, pointer unsafe.Pointer, size C.int64
 
 	buf := unsafe.Slice((*byte)(pointer), size)
 	n, err := r.Read(buf)
+
+	// Bytes first, error second. io.Reader explicitly permits returning
+	// n > 0 together with io.EOF (or any error) in a single call, and the
+	// caller must consume those bytes before considering the error -- the
+	// error surfaces again on the next Read, which returns 0.
+	//
+	// Returning 0 here whenever err was io.EOF discarded the bytes and told
+	// libvips the stream had ended early. Downstream that looks like a
+	// truncated image rather than a read failure: libtiff, for instance,
+	// reports "Read error at scanline N; got X bytes, expected Y".
+	if n > 0 {
+		return C.int64_t(n)
+	}
+
 	if errors.Is(err, io.EOF) {
 		return 0
-	} else if err != nil {
+	}
+	if err != nil {
 		vipsError("imgproxyReaderRead", "error reading from imgproxy source: %v", err)
 		return -1
 	}
 
-	return C.int64_t(n)
+	return 0
 }
+
+// Helpers so tests can drive the cgo callbacks: a _test.go file cannot import
+// "C" itself.
+func C_uintptr(h cgo.Handle) C.uintptr_t { return C.uintptr_t(h) }
+func C_int64(n int) C.int64_t            { return C.int64_t(n) }

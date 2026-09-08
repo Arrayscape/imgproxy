@@ -207,6 +207,52 @@ production does. A **PNG master** requested as `.jpg` also returns JPEG, and
 they do *not* reproduce it — 1/35, with quality mispredicted on 20. No
 production url does this.
 
+### 5.2 AVIF
+
+Encoded through **libavif 0.11.1 + libaom 3.6.0**, linked statically, not
+through libvips. Not a tuning choice: the CDN's AVIFs carry `hdlr` name
+`libavif` and libavif's own box layout, so libheif output would be the wrong
+encoder however it was configured. There are no container fix-ups — all 429
+header bytes already match, differing only in `iloc` offsets, which are
+functions of payload size.
+
+Three settings are load-bearing and none is guessable:
+
+- **`avifEncoderAddImage(enc, image, 1, 0)` — flags 0**, not
+  `AVIF_ADD_IMAGE_FLAG_SINGLE`. This is why `avifenc` can never reproduce the
+  CDN and a direct C caller is required. It decides three things at once: aom
+  usage (all-intra vs realtime), `still_picture`/`reduced_still_picture_header`
+  (both 0 in prod), and whether a fully opaque alpha plane is dropped — prod
+  emits an alpha item on **every** rendition, including opaque JPEG masters.
+  There is a test for exactly that.
+- **`maxThreads >= 2`.** libavif sets `AV1E_SET_ROW_MT` only above 1, and
+  libaom's row-MT encode is a *different bitstream*. The count is irrelevant.
+- **libavif built with `-ffp-contract=off`.** Its `reformat.c` does RGB→YUV in
+  float; aarch64 contracts `a*b+c` into `fmla` and x86-64 baseline cannot, so
+  without the flag the two architectures feed libaom different YUV. libaom
+  itself needs no flags.
+
+Settings: profile 0, 8-bit, 4:2:0, full range, CICP 2/2/2, no ICC (the profile
+is consumed by the `icc_transform` earlier, not carried into the rendition),
+speed 9. `q_N` selects `minQuantizer` from a **28-point measured table** — the
+curve has no closed form — with alpha fixed at 27/35 regardless of `q`, and a
+url with no `q_` behaving as `q_90`. `maxQuantizer` is inert (every value from
+minQ to 63 gives identical bytes); `minQ + 8` reproduces what Wix sends.
+
+A `q` outside the 28 measured points falls back to the nearest one and is
+flagged internally as inexact — it cannot be derived, only guessed. No
+production url uses one.
+
+**Status: reproduces the specified shape, not a settled result.** Upstream
+measures 21/25 on virgin masters, with four renditions differing by +1, +10,
++29 and -37 bytes on identical input pixels, identical AV1 header fields and
+identical containers. That residual is unexplained.
+
+Because libaom 3.6.0 shares a soname with the 3.14.1 the base builds for
+libheif, both AVIF libraries are **static in a private prefix**
+(`/opt/wix-avif`) and linked into the binary; nothing of them is needed at
+runtime.
+
 ## 6. Access control
 
 Wix URLs are unsigned, and this route is unsigned by default. Two ways to bound it:
@@ -308,37 +354,49 @@ CDN — see `IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS` in §1.
 
 ## 9. Master formats
 
-WIX-URL-SPEC §7.4 measured the real upload API, and it bounds what the CDN's
-transform pipeline can ever be handed.
+OP-SPEC §9.1 measured the real upload API, one probe per format, and sorts
+accepted formats into dispositions that decide what the transform path must do.
+Ingest sniffs **content**, not the extension, and so does this fork.
 
-**TIFF and JPEG XL are refused** — a request for such a master returns 422:
+| Master | Disposition | What we do |
+|---|---|---|
+| JPEG, PNG, WebP | stored verbatim | decode, transform, encode |
+| **AVIF** | kept verbatim, needs a decoder | decode, transform, encode |
+| **GIF** | passed through untransformed | **serve the stored bytes** — see below |
+| TIFF, HEIC/HEIF, BMP | transcoded at ingest | refuse (422) |
+| JPEG XL | rejected at ingest | refuse (422) |
 
-- A **TIFF** upload is transcoded. The canonical media id is the `~mv2.png`
-  derivative and renditions are produced from that. The original TIFF *is*
-  preserved, but only at the `~mv2.tif` id, which serves it untransformed.
-- **JPEG XL** is rejected at upload, and by content rather than by filename: a
-  PUT declaring PNG in both the name and the MIME type still got 406 on the
-  JXL bytes.
+**GIF is not transformed.** Ingest stores it verbatim and the media router
+answers rather than the image manipulator, so `w_180,h_135` returns the
+FULL-SIZE original — which is also how animation survives. We serve the stored
+bytes with `Content-Type: image/gif`, deciding before decode because there is
+nothing to decode. Tests assert that `fit`, `fill`, chained `crop`, `usm` and
+`blur` all leave the bytes untouched.
 
-So neither can reach the CDN's transform pipeline as a renderable master, and
-there is no observable behaviour to reproduce. Rendering them anyway would mean
-inventing a transform and presenting it as emulation. Refusing is the honest
-answer *while the behaviour is unobservable* — this is a temporary position, not
-a judgement that the formats are unsupportable. If Wix starts accepting them,
-deleting one entry in `wix.MasterFormatSupported` re-enables the format;
-imgproxy decodes both already.
+**AVIF masters need a real decoder**, and their canonical id stays `~mv2.avif`
+with no PNG sibling. The reference build (`arrayscape/vips-wix:fork`) has no
+libheif and cannot open one at all; this fork's base does, so an AVIF master
+decodes and renders rather than erroring.
 
-The refusal is decided by **content**, not by the media-id extension — matching
-the way Wix's own upload service sniffs bytes rather than trusting the name.
+That is a prerequisite, **not** a claim of byte-exactness. A libvips+libheif
+build measures **3/12 whole-file byte-exact**, and the residual is in the
+*decode* — proved on identity renditions, and sitting in the YCbCr→RGB matrix
+step: `matrix=0` is exact while `matrix=6` (BT.601, what real cameras emit) is
+off by ±1..5 on every rendition. So AVIF **input** is not reproduced, only
+supported. It is zero-impact today — the corpus contains no AVIF masters — and
+the gap is recorded in §10 rather than treated as closed.
 
-**Everything else imgproxy can decode is accepted.** GIF, BMP, HEIC and AVIF
-are all accepted Wix uploads that this corpus simply does not contain, and
-untested is not unsupported. Format detection delegates to imgproxy's registry
-rather than a hand-written list, so no format silently falls through a gap.
+**The refused formats are unobservable, not unsupportable.** Ingest either
+transcodes them — the canonical id becomes a `~mv2.png` derivative, and no
+production url points at the original, which survives at its own extension — or
+rejects them outright. Either way no renderable master of them can exist, so
+there is no CDN behaviour to reproduce and rendering one would be inventing a
+transform. If Wix's ingest changes, `wix.FormatDisposition` is the single place
+to update; imgproxy decodes all of them already.
 
-A corollary for the test suite: the one remaining failure — a ThunderScan TIFF
-libvips 8.15.5 cannot decode — is now **irrelevant to the Wix path**, since
-TIFF is refused there outright.
+Refusal is decided by **content**, matching Wix's own 406 on bytes whose
+filename and MIME type both claimed PNG. A TIFF behind a `~mv2.png` id is
+refused, and there is a test for exactly that.
 
 ## 10. What is verified, and what is not
 
@@ -357,8 +415,17 @@ Against live CDN output, on the master render path:
 **Not verified.** Treat these as best-effort, implemented from the specification
 rather than measured:
 
-- **AVIF** — the negotiation that selects it is exact; the encoder settings are
-  still under analysis and are not reproduced here.
+- **AVIF input (decoding a master).** Supported, not reproduced: a
+  libvips+libheif build is 3/12 whole-file byte-exact and the residual is in
+  the decode's YCbCr→RGB matrix step, not in anything downstream. Zero AVIF
+  masters in the corpus, so zero impact today.
+- **AVIF output.** The negotiation that selects it is exact and the encoder
+  follows §7.5 — libavif 0.11.1 + libaom 3.6.0, `avifEncoderAddImage` flags 0,
+  `maxThreads >= 2`, `-ffp-contract=off` — but upstream measures it at **21/25
+  on virgin masters** with four renditions differing by +1, +10, +29 and -37
+  bytes on identical input pixels, identical AV1 header fields and identical
+  containers. That residual is unexplained, so this reproduces the specified
+  shape rather than a settled result.
 - **JPEG from a PNG master.** §7.4's settings reproduce JPEG from a JPEG master,
   not from a PNG one (1/35 upstream, quality mispredicted on 20). Reachable via
   a `.jpg` name with no `enc_`, but no production url does it.

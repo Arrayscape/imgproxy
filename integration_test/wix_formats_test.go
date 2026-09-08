@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,19 +37,34 @@ type WixFormatsTestSuite struct {
 }
 
 // masterFormats maps a media id to a source file in the test-images submodule.
+// masterFormats render through the normal transform path.
+//
+// AVIF is here because it is the one format ingest keeps verbatim that needs a
+// real decoder, and the reference build has no libheif at all. These tests
+// prove it DECODES AND RENDERS rather than erroring -- they do NOT prove
+// byte-exactness. AVIF input is measured at 3/12 whole-file, with the residual
+// in the decode's YCbCr->RGB matrix step. Zero AVIF masters in the corpus.
 var masterFormats = map[string]string{
-	"0a7ba9_30000000000000000000000000000000~mv2.gif": "gif/gif.gif",
-	"0a7ba9_40000000000000000000000000000000~mv2.bmp": "bmp/24-bpp.bmp",
+	"0a7ba9_70000000000000000000000000000000~mv2.avif": "avif/avif.avif",
 }
 
-// refusedFormats must NOT render: the CDN's upload path never lets them reach
-// its transform pipeline. See the package comment above.
+// refusedFormats must NOT render. §9.1: ingest either transcodes these (TIFF,
+// HEIC, BMP -- the canonical id becomes a ~mv2.png derivative) or rejects them
+// (JPEG XL), so no renderable master of them can exist and the CDN's behaviour
+// on the transform path is unobservable.
 var refusedFormats = map[string]string{
 	"0a7ba9_10000000000000000000000000000000~mv2.tiff": "tiff/8-bpp.tiff",
 	"0a7ba9_20000000000000000000000000000000~mv2.jxl":  "jxl/8-bpp.jxl",
+	"0a7ba9_40000000000000000000000000000000~mv2.bmp":  "bmp/24-bpp.bmp",
+	"0a7ba9_80000000000000000000000000000000~mv2.heic": "heif/heif.heif",
 	// The extension lies here -- a TIFF wearing a .png media id -- so this also
 	// proves the refusal is decided by content, as Wix's own 406 is.
 	"0a7ba9_50000000000000000000000000000000~mv2.png": "tiff/8-bpp.tiff",
+}
+
+// passThroughFormats are served untransformed, bytes unchanged.
+var passThroughFormats = map[string]string{
+	"0a7ba9_30000000000000000000000000000000~mv2.gif": "gif/gif.gif",
 }
 
 func (s *WixFormatsTestSuite) SetupSuite() {
@@ -63,7 +79,7 @@ func (s *WixFormatsTestSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.masters = dir
 
-	for _, set := range []map[string]string{masterFormats, refusedFormats} {
+	for _, set := range []map[string]string{masterFormats, refusedFormats, passThroughFormats} {
 		for id, rel := range set {
 			b, err := os.ReadFile(filepath.Join(src, rel))
 			if err != nil {
@@ -134,6 +150,57 @@ func (s *WixFormatsTestSuite) TestWebPNegotiationWorksForEveryMaster() {
 			defer res.Body.Close()
 			s.Require().Equal(http.StatusOK, res.StatusCode)
 			s.Equal("image/webp", res.Header.Get("Content-Type"))
+		})
+	}
+}
+
+func (s *WixFormatsTestSuite) TestGIFIsPassedThroughUntransformed() {
+	// §9.1: ingest stores GIF verbatim and the media router answers rather than
+	// the image manipulator, so the transform is NOT applied. A `fit` that
+	// would shrink the image returns the FULL-SIZE original instead, byte for
+	// byte -- which is also how animation survives.
+	for id, rel := range passThroughFormats {
+		s.Run(rel, func() {
+			path := filepath.Join(s.masters, id)
+			original, err := os.ReadFile(path)
+			if err != nil {
+				s.T().Skip("not present in this checkout")
+			}
+
+			res := s.GET("/media/" + id + "/v1/fit/w_180,h_135/x.gif")
+			defer res.Body.Close()
+			s.Require().Equal(http.StatusOK, res.StatusCode)
+
+			body, err := io.ReadAll(res.Body)
+			s.Require().NoError(err)
+
+			s.Equal("image/gif", res.Header.Get("Content-Type"))
+			s.Equal(original, body,
+				"a GIF master must come back untransformed, byte for byte, "+
+					"even though the url asks for w_180,h_135")
+		})
+	}
+}
+
+func (s *WixFormatsTestSuite) TestGIFPassThroughIgnoresEveryTransform() {
+	id := "0a7ba9_30000000000000000000000000000000~mv2.gif"
+	original, err := os.ReadFile(filepath.Join(s.masters, id))
+	if err != nil {
+		s.T().Skip("not present in this checkout")
+	}
+	// Not just fit: nothing on the transform path applies.
+	for _, u := range []string{
+		"fit/w_10,h_10",
+		"fill/w_50,h_50,al_c",
+		"crop/x_1,y_1,w_20,h_20/fill/w_5,h_5",
+		"fit/w_60,h_60,usm_0.66_1.00_0.01,blur_2",
+	} {
+		s.Run(u, func() {
+			res := s.GET("/media/" + id + "/v1/" + u + "/x.gif")
+			defer res.Body.Close()
+			s.Require().Equal(http.StatusOK, res.StatusCode)
+			body, _ := io.ReadAll(res.Body)
+			s.Equal(original, body)
 		})
 	}
 }

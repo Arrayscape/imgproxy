@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"unsafe"
 
 	"github.com/imgproxy/imgproxy/v4/imagedata"
@@ -116,47 +115,6 @@ func (img *Image) WixResetResolution() error {
 	return nil
 }
 
-// wixRandomAccess makes the next Load open with VIPS_ACCESS_RANDOM.
-//
-// It is a package-level switch rather than a Load parameter because Load is
-// upstream's, called from the native pipeline too, and threading an access mode
-// through every caller would be a much larger diff for one consumer. Guarded by
-// a mutex and set only around a Wix load, which holds the OS thread anyway.
-var (
-	wixAccessMu     sync.Mutex
-	wixRandomAccess bool
-)
-
-// WithRandomAccess runs fn with loads opening in VIPS_ACCESS_RANDOM.
-//
-// OP-SPEC.md §2: "Open every image with access=random. This is the single most
-// important rule in this document after the geometry."
-//
-// reducev puts a SEQUENTIAL input behind a line cache, and that cache's strip
-// height decides which output rows land exactly on a phase tie -- so under
-// sequential access the result depends on the strip height AND on what consumes
-// the resize. Chaining a sharpen after the resize changes the demand pattern,
-// moves the strip boundaries, and changes the output; a tile height tuned for
-// the plain path is wrong for the sharpened path. Random access removes the
-// line cache entirely and is byte-exact on both.
-func WithRandomAccess(fn func() error) error {
-	wixAccessMu.Lock()
-	wixRandomAccess = true
-	defer func() {
-		wixRandomAccess = false
-		wixAccessMu.Unlock()
-	}()
-	return fn()
-}
-
-// loadAccess reports the access mode the next load should use.
-func loadAccess(imagedata.ImageData) C.VipsAccess {
-	if wixRandomAccess {
-		return C.VIPS_ACCESS_RANDOM
-	}
-	return C.VIPS_ACCESS_SEQUENTIAL
-}
-
 // saveWix runs one of the _wix savers into a fresh memory target and wraps the
 // result. Mirrors the bookkeeping in Image.Save.
 func (img *Image) saveWix(
@@ -194,6 +152,23 @@ func (img *Image) WixAutorot() error {
 	}
 	img.swapAndUnref(tmp)
 	return nil
+}
+
+// WixRGBA flattens the image to 8-bit RGBA and returns the raw pixels.
+//
+// Always four bands, so the AVIF encoder always receives an alpha plane --
+// which is what prod emits on every rendition regardless of the master.
+func (img *Image) WixRGBA() ([]byte, int, int, error) {
+	var (
+		ptr unsafe.Pointer
+		n   C.size_t
+	)
+	if C.vips_rgba_wix(img.VipsImage, &ptr, &n) != 0 {
+		return nil, 0, 0, Error()
+	}
+	defer C.g_free(C.gpointer(ptr))
+
+	return C.GoBytes(ptr, C.int(n)), img.Width(), img.Height(), nil
 }
 
 // WixPixelsPerMetre reports the image resolution the way a PNG pHYs chunk

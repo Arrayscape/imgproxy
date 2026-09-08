@@ -72,32 +72,51 @@ func isLosslessWebP(head []byte) bool {
 		bytes.Equal(head[12:16], []byte("VP8L"))
 }
 
-// MasterFormatSupported reports whether the Wix path will render a master of
-// this format.
+// Disposition is how the CDN's ingest treats a master format, which decides
+// what the transform path must do with it. OP-SPEC §9.1, measured one probe per
+// format against the real upload API.
+type Disposition int
+
+const (
+	// DispositionTransform is the normal path: decode, transform, encode.
+	// JPEG, PNG, WebP and AVIF.
+	DispositionTransform Disposition = iota
+
+	// DispositionPassThrough serves the stored bytes untransformed. GIF only:
+	// ingest passes it through, and the media router answers rather than the
+	// image manipulator, so `w_180,h_135` returns the FULL-SIZE original and
+	// animation survives.
+	DispositionPassThrough
+
+	// DispositionUnreachable is a format ingest transcodes or rejects, so no
+	// renderable master of it can exist and the CDN's behaviour is
+	// unobservable. Refused rather than guessed at.
+	DispositionUnreachable
+)
+
+// FormatDisposition classifies a sniffed master format. OP-SPEC §9.1:
 //
-// TIFF and JPEG XL are deliberately OFF. Not because they are hard, and not
-// because this corpus lacks them, but because the CDN's upload path prevents
-// either from ever reaching its transform pipeline as a renderable master
-// (WIX-URL-SPEC §7.4, measured against the real upload API):
+//	transcoded at ingest        TIFF, HEIC/HEIF, BMP   -> unreachable
+//	passed through untransformed GIF                    -> pass through
+//	kept verbatim and decoded    AVIF                   -> transform
+//	rejected                     JPEG XL                -> unreachable
 //
-//   - A TIFF upload is transcoded. The canonical media id is the `~mv2.png`
-//     derivative and renditions come from that; the original TIFF is preserved,
-//     but only at the `~mv2.tif` id, which serves it untransformed.
-//   - JPEG XL is rejected at upload, by content sniffing rather than by
-//     filename: a PUT declaring PNG in both the name and the MIME type still
-//     got 406 on the JXL bytes.
-//
-// So there is no observable CDN behaviour for either. Rendering them anyway
-// would mean inventing a transform and calling it emulation. Refusing is the
-// honest answer until Wix accepts them, at which point deleting the entry below
-// re-enables the format -- imgproxy decodes both already.
-//
-// Everything else imgproxy can decode stays enabled: GIF, BMP, HEIC and AVIF
-// are all accepted uploads, merely untested, and untested is not unsupported.
-func MasterFormatSupported(t imagetype.Type) bool {
+// The transcoded formats survive at their own extension but no production url
+// points at them; the canonical id is always the `~mv2.png` derivative. AVIF is
+// the one that genuinely needs a decoder on the transform path -- one the
+// reference fork lacks and this build has.
+func FormatDisposition(t imagetype.Type) Disposition {
 	switch t {
-	case imagetype.TIFF, imagetype.JXL:
-		return false
+	case imagetype.GIF:
+		return DispositionPassThrough
+	case imagetype.TIFF, imagetype.HEIC, imagetype.BMP, imagetype.JXL:
+		return DispositionUnreachable
 	}
-	return true
+	return DispositionTransform
+}
+
+// MasterFormatSupported reports whether the Wix path will decode and transform
+// a master of this format. Pass-through formats are handled before this.
+func MasterFormatSupported(t imagetype.Type) bool {
+	return FormatDisposition(t) != DispositionUnreachable
 }

@@ -10,7 +10,7 @@
 #   --build-arg BASE_IMAGE=ghcr.io/imgproxy/imgproxy-base
 #   --build-arg BASE_IMAGE_VERSION=v4.1.5
 ARG BASE_IMAGE="ghcr.io/arrayscape/imgproxy-base-wix"
-ARG BASE_IMAGE_VERSION="v4.1.5-vips8.15.5-wix2"
+ARG BASE_IMAGE_VERSION="v4.1.5-vips8.15.5-wix3"
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_VERSION} AS build
 
@@ -60,6 +60,8 @@ RUN apt-get update \
 
 COPY --from=build /opt/imgproxy/bin/imgproxy /opt/imgproxy/bin/
 COPY --from=build /opt/imgproxy/lib /opt/imgproxy/lib
+# libavif and libaom are linked statically into the binary, so nothing from
+# /opt/wix-avif is needed at runtime -- it exists only in the build stage.
 RUN ln -s /opt/imgproxy/bin/imgproxy /usr/local/bin/imgproxy
 
 COPY docker/entrypoint.sh /usr/local/bin/

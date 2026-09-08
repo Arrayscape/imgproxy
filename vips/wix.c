@@ -72,6 +72,40 @@ vips_autorot_wix(VipsImage *in, VipsImage **out)
   return 0;
 }
 
+int
+vips_rgba_wix(VipsImage *in, void **out, size_t *len)
+{
+  VipsImage *base = vips_image_new();
+  VipsImage **t = (VipsImage **) vips_object_local_array(VIPS_OBJECT(base), 4);
+  VipsImage *cur = in;
+
+  if (cur->Type != VIPS_INTERPRETATION_sRGB) {
+    if (vips_colourspace(cur, &t[0], VIPS_INTERPRETATION_sRGB, NULL)) {
+      g_object_unref(base);
+      return 1;
+    }
+    cur = t[0];
+  }
+  if (!vips_image_hasalpha(cur)) {
+    if (vips_addalpha(cur, &t[1], NULL)) {
+      g_object_unref(base);
+      return 1;
+    }
+    cur = t[1];
+  }
+  if (cur->BandFmt != VIPS_FORMAT_UCHAR) {
+    if (vips_cast(cur, &t[2], VIPS_FORMAT_UCHAR, NULL)) {
+      g_object_unref(base);
+      return 1;
+    }
+    cur = t[2];
+  }
+
+  *out = vips_image_write_to_memory(cur, len);
+  g_object_unref(base);
+  return *out == NULL;
+}
+
 double
 vips_xres_wix(VipsImage *in)
 {

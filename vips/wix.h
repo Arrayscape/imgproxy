@@ -52,6 +52,14 @@ int vips_reset_resolution_wix(VipsImage *in, VipsImage **out);
 // different output box, not merely a rotated image.
 int vips_autorot_wix(VipsImage *in, VipsImage **out);
 
+// Flatten to 8-bit RGBA in memory, for handing to the AVIF encoder.
+//
+// Always four bands: OP-SPEC §7.5's encoder takes RGBA unconditionally, and
+// prod emits an alpha item on EVERY rendition including opaque JPEG masters --
+// a consequence of avifEncoderAddImage's flags, not of the input having alpha.
+// The caller frees *out with g_free.
+int vips_rgba_wix(VipsImage *in, void **out, size_t *len);
+
 // Image resolution in pixels/mm, as pngsave would encode into pHYs. WebP has
 // no pHYs chunk, so the §8.3 resolution precedence needs it from the image.
 double vips_xres_wix(VipsImage *in);

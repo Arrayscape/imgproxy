@@ -8,6 +8,7 @@ import (
 	"github.com/imgproxy/imgproxy/v4/imagetype"
 	"github.com/imgproxy/imgproxy/v4/vips"
 	wixspec "github.com/imgproxy/imgproxy/v4/wix"
+	"github.com/imgproxy/imgproxy/v4/wixavif"
 )
 
 // Encode writes the rendered image in the negotiated format. OP-SPEC §7.
@@ -19,7 +20,6 @@ func Encode(
 	src *Source,
 	format imagetype.Type,
 	enc wixspec.Encoding,
-	avifEffort int,
 ) (imagedata.ImageData, error) {
 	switch format {
 	case imagetype.PNG:
@@ -29,12 +29,7 @@ func Encode(
 		return encodeWebP(img, src, enc)
 
 	case imagetype.AVIF:
-		// UNVERIFIED encoder settings; the §4 negotiation that selects it is
-		// exact. See WIXEMU.md.
-		if err := stripForLossy(img); err != nil {
-			return nil, err
-		}
-		return img.WixSaveAVIF(enc.Quality, avifEffort)
+		return encodeAVIF(img, enc)
 
 	case imagetype.JPEG:
 		return encodeJPEG(img, src, enc)
@@ -108,6 +103,38 @@ func encodeWebP(img *vips.Image, src *Source, enc wixspec.Encoding) (imagedata.I
 	}
 
 	return imagedata.NewFromBytesWithFormat(imagetype.WEBP, fixed), nil
+}
+
+// encodeAVIF encodes through libavif rather than libvips. OP-SPEC §7.5.
+//
+// Not libvips, and not a settings choice: the CDN's AVIFs carry `hdlr` name
+// "libavif" and libavif's own box layout, so libheif output would be the wrong
+// encoder whatever it was tuned to. There are no container fix-ups -- all 429
+// header bytes already match, differing only in iloc offsets, which are
+// functions of payload size.
+func encodeAVIF(img *vips.Image, enc wixspec.Encoding) (imagedata.ImageData, error) {
+	// The encoder takes pixels, so nothing in it decodes: the rendering
+	// pipeline stays the single source of them.
+	rgba, w, h, err := img.WixRGBA()
+	if err != nil {
+		return nil, fmt.Errorf("wix: flattening to RGBA: %w", err)
+	}
+
+	q := enc.AVIFQuality()
+	minQ, maxQ, _ := wixspec.AVIFQuantizers(q)
+
+	out, err := wixavif.Encode(rgba, w, h, wixavif.Params{
+		MinQ: minQ, MaxQ: maxQ,
+		MinAlphaQ: wixspec.AVIFAlphaQuantizers[0],
+		MaxAlphaQ: wixspec.AVIFAlphaQuantizers[1],
+		Speed:     wixspec.AVIFSpeed,
+		Threads:   wixspec.AVIFThreads,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return imagedata.NewFromBytesWithFormat(imagetype.AVIF, out), nil
 }
 
 // encodeJPEG saves and then applies the §8.5 container fix-ups.

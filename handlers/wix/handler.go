@@ -339,6 +339,17 @@ func (h *Handler) renderFromMaster(
 	}
 	defer data.Close()
 
+	// §9.1: GIF is passed through untransformed. Ingest stores it verbatim and
+	// the media router answers rather than the image manipulator, so the
+	// transform is NOT applied -- w_180,h_135 returns the full-size original,
+	// and animation survives. Decided before decoding, because there is
+	// nothing to decode.
+	if passthrough, perr := h.passThrough(data); perr != nil {
+		return nil, "", perr
+	} else if passthrough != nil {
+		return passthrough, "passthrough", nil
+	}
+
 	img := new(vips.Image)
 	defer img.Clear()
 
@@ -363,7 +374,7 @@ func (h *Handler) renderFromMaster(
 		return nil, "", fmt.Errorf("wix: could not determine the stored master's format")
 	}
 
-	out, err := procwix.Encode(img, src, format, enc, 9-h.config.AVIFSpeed)
+	out, err := procwix.Encode(img, src, format, enc)
 	if err != nil {
 		return nil, "", err
 	}
@@ -437,7 +448,7 @@ func (h *Handler) deriveFrom(
 		return nil, "", err
 	}
 
-	out, err := procwix.Encode(img, src, format, enc, 9-h.config.AVIFSpeed)
+	out, err := procwix.Encode(img, src, format, enc)
 	if err != nil {
 		return nil, "", err
 	}
@@ -446,6 +457,33 @@ func (h *Handler) deriveFrom(
 		plan.NX, plan.NY, plan.NX+plan.HW, plan.NY+plan.HH), anc.Depth+1)
 
 	return out, "derived", nil
+}
+
+// passThrough returns the stored bytes when the master's format is served
+// untransformed, or nil when it is not. See wix.DispositionPassThrough.
+func (h *Handler) passThrough(data imagedata.ImageData) (imagedata.ImageData, error) {
+	r := data.Reader()
+	head := make([]byte, wixspec.HeadSize)
+	n, err := io.ReadFull(r, head)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, fmt.Errorf("wix: cannot read master head: %w", err)
+	}
+	head = head[:n]
+
+	format := wixspec.StoredFormat(head)
+	if wixspec.FormatDisposition(format) != wixspec.DispositionPassThrough {
+		return nil, nil
+	}
+
+	// Re-read from the start: the whole file is the response.
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("wix: cannot rewind master: %w", err)
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("wix: cannot read master: %w", err)
+	}
+	return imagedata.NewFromBytesWithFormat(format, b), nil
 }
 
 // masterFacts records what the stored master IS, so a cache hit can pick the
