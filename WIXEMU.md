@@ -235,7 +235,41 @@ Substituting the unmodified upstream base still builds, but the Wix route
 refuses to start rather than serve output that silently does not reproduce the
 CDN — see `IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS` in §1.
 
-## 9. What is verified, and what is not
+## 9. Master formats
+
+WIX-URL-SPEC §7.4 measured the real upload API, and it bounds what the CDN's
+transform pipeline can ever be handed.
+
+**TIFF and JPEG XL are refused** — a request for such a master returns 422:
+
+- A **TIFF** upload is transcoded. The canonical media id is the `~mv2.png`
+  derivative and renditions are produced from that. The original TIFF *is*
+  preserved, but only at the `~mv2.tif` id, which serves it untransformed.
+- **JPEG XL** is rejected at upload, and by content rather than by filename: a
+  PUT declaring PNG in both the name and the MIME type still got 406 on the
+  JXL bytes.
+
+So neither can reach the CDN's transform pipeline as a renderable master, and
+there is no observable behaviour to reproduce. Rendering them anyway would mean
+inventing a transform and presenting it as emulation. Refusing is the honest
+answer *while the behaviour is unobservable* — this is a temporary position, not
+a judgement that the formats are unsupportable. If Wix starts accepting them,
+deleting one entry in `wix.MasterFormatSupported` re-enables the format;
+imgproxy decodes both already.
+
+The refusal is decided by **content**, not by the media-id extension — matching
+the way Wix's own upload service sniffs bytes rather than trusting the name.
+
+**Everything else imgproxy can decode is accepted.** GIF, BMP, HEIC and AVIF
+are all accepted Wix uploads that this corpus simply does not contain, and
+untested is not unsupported. Format detection delegates to imgproxy's registry
+rather than a hand-written list, so no format silently falls through a gap.
+
+A corollary for the test suite: the one remaining failure — a ThunderScan TIFF
+libvips 8.15.5 cannot decode — is now **irrelevant to the Wix path**, since
+TIFF is refused there outright.
+
+## 10. What is verified, and what is not
 
 Against live CDN output, on the master render path:
 
@@ -244,8 +278,9 @@ Against live CDN output, on the master render path:
 | `fit` | 908 / 908 byte-exact |
 | `fill` | 433 / 433 byte-exact |
 | `crop` | 70 / 70 |
-| `usm` | 684 / 685 |
-| WebP VP8 / VP8L | 5/5 and 23/27 — **payload only**, the RIFF container was never compared |
+| `usm` | 685 / 685 |
+| WebP VP8L (lossless) | 24 / 24 |
+| WebP VP8 (lossy) | **4 / 5 — one open mismatch, under investigation** |
 
 **Not verified.** Treat these as best-effort, implemented from the specification
 rather than measured:
@@ -276,7 +311,7 @@ rather than measured:
   our own arithmetic and is unverified against the CDN.**
 - **`lg_N`** — unexplained rather than proven inert.
 
-## 10. Coverage against WIX-URL-SPEC
+## 11. Coverage against WIX-URL-SPEC
 
 | Spec section | Status |
 |---|---|
@@ -299,7 +334,7 @@ rather than measured:
 | §7.2 originals not stripped | implemented, deliberately |
 | §7.3 colour → Wix sRGB | implemented, including on a bare `crop` |
 
-## 11. Cache-derived renditions (§6 / OP-SPEC §10)
+## 12. Cache-derived renditions (§6 / OP-SPEC §10)
 
 The CDN caches transformed output and uses it as the input to later transforms,
 which is how roughly half of a mature URL set is produced. This fork does the
@@ -362,7 +397,7 @@ so a derived rendition carries `pHYs 1000` and an `XResolution` of `25400/1000`
 derived from it, per §8.3 step 3 — which is what the CDN emits, measured on
 1307 of 1307 cache-derived renditions. The master path is unaffected.
 
-## 12. Not implemented
+## 13. Not implemented
 
 **A persistent rendition cache.** The derivation cache in §10 is in-process
 only, so it is empty after a restart and not shared between replicas. An

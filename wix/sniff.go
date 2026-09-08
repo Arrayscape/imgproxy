@@ -71,3 +71,33 @@ func isLosslessWebP(head []byte) bool {
 		bytes.Equal(head[8:12], []byte("WEBP")) &&
 		bytes.Equal(head[12:16], []byte("VP8L"))
 }
+
+// MasterFormatSupported reports whether the Wix path will render a master of
+// this format.
+//
+// TIFF and JPEG XL are deliberately OFF. Not because they are hard, and not
+// because this corpus lacks them, but because the CDN's upload path prevents
+// either from ever reaching its transform pipeline as a renderable master
+// (WIX-URL-SPEC §7.4, measured against the real upload API):
+//
+//   - A TIFF upload is transcoded. The canonical media id is the `~mv2.png`
+//     derivative and renditions come from that; the original TIFF is preserved,
+//     but only at the `~mv2.tif` id, which serves it untransformed.
+//   - JPEG XL is rejected at upload, by content sniffing rather than by
+//     filename: a PUT declaring PNG in both the name and the MIME type still
+//     got 406 on the JXL bytes.
+//
+// So there is no observable CDN behaviour for either. Rendering them anyway
+// would mean inventing a transform and calling it emulation. Refusing is the
+// honest answer until Wix accepts them, at which point deleting the entry below
+// re-enables the format -- imgproxy decodes both already.
+//
+// Everything else imgproxy can decode stays enabled: GIF, BMP, HEIC and AVIF
+// are all accepted uploads, merely untested, and untested is not unsupported.
+func MasterFormatSupported(t imagetype.Type) bool {
+	switch t {
+	case imagetype.TIFF, imagetype.JXL:
+		return false
+	}
+	return true
+}

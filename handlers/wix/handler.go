@@ -235,6 +235,13 @@ func (h *Handler) serveTransform(
 
 	result, origin, rerr := h.render(ctx, r, req.Header.Get("Accept"))
 	if rerr != nil {
+		// A master the CDN's upload path would never have accepted is a
+		// property of the request, not a server fault: 422, not 500.
+		if errors.Is(rerr, procwix.ErrUnsupportedMasterFormat) {
+			return server.NewError(
+				handlers.NewCantLoadError(ctx, imagetype.Unknown),
+				handlers.ErrCategoryPathParsing)
+		}
 		return server.NewError(errctx.Wrap(rerr), handlers.ErrCategoryProcessing)
 	}
 	defer result.Close()

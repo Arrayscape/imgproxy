@@ -11,12 +11,22 @@ import (
 	"github.com/imgproxy/imgproxy/v4/testutil/servertest"
 )
 
-// Master formats beyond the three one site's corpus happened to contain.
+// Master formats beyond png/jpeg/webp.
 //
-// WIX-URL-SPEC §1.1 measured 366 masters as png/jpeg/webp only, but that is a
-// property of that corpus, not of the CDN. A general emulator must handle every
-// format it can decode, so these render real TIFF, JXL, GIF and BMP masters
-// through the Wix path.
+// Two groups, and the distinction is the point:
+//
+// GIF, BMP, HEIC and AVIF are accepted uploads that this corpus merely does not
+// contain. Untested is not unsupported, so they render -- format detection
+// delegates to imgproxy's registry rather than a hand-written list, which is
+// what stops "the corpus didn't happen to contain that" from becoming a bug.
+//
+// TIFF and JPEG XL are REFUSED. WIX-URL-SPEC §7.4 measured the real upload API:
+// a TIFF upload is transcoded, so the canonical id is the `~mv2.png` derivative
+// and renditions come from that (the original TIFF is preserved, but only at
+// the `~mv2.tif` id, served untransformed); and JPEG XL is rejected at upload
+// by content sniffing. Neither can reach the CDN's transform pipeline as a
+// renderable master, so there is no observable behaviour to reproduce.
+// Rendering them would be inventing a transform and calling it emulation.
 //
 // Uses the test-images submodule; skipped when it is not checked out.
 
@@ -27,12 +37,17 @@ type WixFormatsTestSuite struct {
 
 // masterFormats maps a media id to a source file in the test-images submodule.
 var masterFormats = map[string]string{
+	"0a7ba9_30000000000000000000000000000000~mv2.gif": "gif/gif.gif",
+	"0a7ba9_40000000000000000000000000000000~mv2.bmp": "bmp/24-bpp.bmp",
+}
+
+// refusedFormats must NOT render: the CDN's upload path never lets them reach
+// its transform pipeline. See the package comment above.
+var refusedFormats = map[string]string{
 	"0a7ba9_10000000000000000000000000000000~mv2.tiff": "tiff/8-bpp.tiff",
 	"0a7ba9_20000000000000000000000000000000~mv2.jxl":  "jxl/8-bpp.jxl",
-	"0a7ba9_30000000000000000000000000000000~mv2.gif":  "gif/gif.gif",
-	"0a7ba9_40000000000000000000000000000000~mv2.bmp":  "bmp/24-bpp.bmp",
-	// The extension deliberately lies here: a TIFF wearing a .png media id,
-	// which is the §1.1 trap generalised beyond WebP.
+	// The extension lies here -- a TIFF wearing a .png media id -- so this also
+	// proves the refusal is decided by content, as Wix's own 406 is.
 	"0a7ba9_50000000000000000000000000000000~mv2.png": "tiff/8-bpp.tiff",
 }
 
@@ -48,12 +63,14 @@ func (s *WixFormatsTestSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.masters = dir
 
-	for id, rel := range masterFormats {
-		b, err := os.ReadFile(filepath.Join(src, rel))
-		if err != nil {
-			continue // a format this checkout does not carry
+	for _, set := range []map[string]string{masterFormats, refusedFormats} {
+		for id, rel := range set {
+			b, err := os.ReadFile(filepath.Join(src, rel))
+			if err != nil {
+				continue // a format this checkout does not carry
+			}
+			s.Require().NoError(os.WriteFile(filepath.Join(dir, id), b, 0o644))
 		}
-		s.Require().NoError(os.WriteFile(filepath.Join(dir, id), b, 0o644))
 	}
 }
 
@@ -119,6 +136,37 @@ func (s *WixFormatsTestSuite) TestWebPNegotiationWorksForEveryMaster() {
 			s.Equal("image/webp", res.Header.Get("Content-Type"))
 		})
 	}
+}
+
+func (s *WixFormatsTestSuite) TestRefusedFormatsAreNotRendered() {
+	// Refusing is the honest answer while the behaviour is unobservable: the
+	// CDN's upload path transcodes TIFF and rejects JXL, so it never renders
+	// either and there is nothing to reproduce.
+	for id, rel := range refusedFormats {
+		s.Run(rel+" as "+filepath.Ext(id), func() {
+			if _, err := os.Stat(filepath.Join(s.masters, id)); err != nil {
+				s.T().Skip("not present in this checkout")
+			}
+			res := s.GET("/media/" + id + "/v1/fit/w_100,h_100/x")
+			defer res.Body.Close()
+
+			s.Equal(http.StatusUnprocessableEntity, res.StatusCode,
+				"a %s master must be refused, not rendered (WIX-URL-SPEC §7.4)", rel)
+		})
+	}
+}
+
+func (s *WixFormatsTestSuite) TestRefusalIsDecidedByContentNotExtension() {
+	// A TIFF wearing a .png media id is still refused -- the same way Wix's own
+	// upload service returns 406 on JXL bytes declared as PNG.
+	id := "0a7ba9_50000000000000000000000000000000~mv2.png"
+	if _, err := os.Stat(filepath.Join(s.masters, id)); err != nil {
+		s.T().Skip("not present in this checkout")
+	}
+	res := s.GET("/media/" + id + "/v1/fit/w_100,h_100/x")
+	defer res.Body.Close()
+	s.Equal(http.StatusUnprocessableEntity, res.StatusCode,
+		"the media-id extension must not be able to smuggle a refused format through")
 }
 
 func TestWixFormats(t *testing.T) {

@@ -9,6 +9,7 @@
 package wix
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -17,6 +18,11 @@ import (
 	"github.com/imgproxy/imgproxy/v4/vips"
 	wixspec "github.com/imgproxy/imgproxy/v4/wix"
 )
+
+// ErrUnsupportedMasterFormat is returned for a master in a format the CDN's
+// upload path never lets reach its transform pipeline. See
+// wix.MasterFormatSupported.
+var ErrUnsupportedMasterFormat = errors.New("wix: unsupported master format")
 
 // Source is a decoded master plus everything sniffed from its bytes.
 type Source struct {
@@ -73,9 +79,14 @@ func NewSource(img *vips.Image, data imagedata.ImageData) (*Source, error) {
 		return nil, fmt.Errorf("wix: cannot decode master: %w", err)
 	}
 
+	format := wixspec.StoredFormat(head)
+	if !wixspec.MasterFormatSupported(format) {
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedMasterFormat, format)
+	}
+
 	return &Source{
 		Head:     head,
-		Format:   wixspec.StoredFormat(head),
+		Format:   format,
 		Lossy:    wixspec.StoredLossy(head),
 		Width:    img.Width(),
 		Height:   img.Height(),
