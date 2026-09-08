@@ -90,8 +90,10 @@ type Request struct {
 	// NOT travel the transform path. See OP-SPEC.md §9.
 	Segments []Segment
 
-	// Filename is the trailing path element. It affects CDN caching only, never
-	// the output.
+	// Filename is the trailing path element. Its EXTENSION selects the output
+	// format when the URL carries no `enc_` (WIX-URL-SPEC §4.1) -- an earlier
+	// version of the spec called it arbitrary, which was wrong. With `enc_` it
+	// is back to affecting CDN caching only, because Accept then decides.
 	Filename string
 }
 

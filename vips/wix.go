@@ -180,6 +180,22 @@ func (img *Image) saveWix(
 	return i, nil
 }
 
+// WixAutorot applies EXIF Orientation and clears the tag.
+//
+// OP-SPEC §4.0: the CDN rotates BEFORE geometry, so the source dimensions the
+// geometry sees are the rotated ones. On a 3088x2316 master with Orientation 6
+// asking for fit w_1372,h_1029, the stored size gives scale 0.44430 and a
+// 1372x1029 box while the rotated size gives 0.33323 and 771x1029 -- which is
+// what the CDN returns. It is format-independent.
+func (img *Image) WixAutorot() error {
+	var tmp *C.VipsImage
+	if C.vips_autorot_wix(img.VipsImage, &tmp) != 0 {
+		return Error()
+	}
+	img.swapAndUnref(tmp)
+	return nil
+}
+
 // WixPixelsPerMetre reports the image resolution the way a PNG pHYs chunk
 // encodes it. WebP carries no pHYs, so the §8.3 resolution precedence reads it
 // from the image instead.

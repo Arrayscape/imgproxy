@@ -69,7 +69,7 @@ The route registers ahead of imgproxy's catch-all, so both grammars coexist.
 | `fp_<x>_<y>` | `fp_0.50_0.50` verified; other values **unverified** | Focal point, continuous |
 | `usm_<s>_<a>_<t>` | implemented | Sharpen. Sigma above 10 falls back to 0.5 |
 | `blur_N` | implemented, **thinly verified** | Gaussian blur, sigma N. Verified on one image at one sigma |
-| `q_N` | implemented | Lossy quality, default 85. Ignored on the lossless WebP path, which fixes Q at 75 |
+| `q_N` | implemented | Lossy quality, default 85. Ignored on the lossless WebP path, which fixes Q at 75, and read differently again for JPEG — see §5 |
 | `quality_auto` | **parsed, inert** | Boolean, not numeric: `quality_20`, `quality_50` and `quality_best` are all identical on the CDN and only `auto` vs not-`auto` matters. What `auto` actually changes was never determined, so we parse it and ignore it |
 | `lg_N` | **accepted and ignored** | No case has ever been found where it changes anything |
 | `enc_avif`, `enc_auto` | implemented | Opt-in flag for format negotiation, *not* a format name |
@@ -91,11 +91,24 @@ preferring **avif > webp > the stored master's own format**:
 A client sending `Accept: */*` therefore never sees AVIF, whatever the URL says.
 Responses carry `Vary: Accept`.
 
+**Without `enc_`, the filename extension decides and `Accept` is ignored
+entirely** (§4.1). So a PNG master really does serve JPEG for a `.jpg` name —
+the two rules select different encoders, and opting out of negotiation is not a
+no-op. An unrecognised or absent extension falls back to the master's format.
+In practice production always opts in: 2613 of 2648 rendition urls carry `enc_`.
+
 **WebP codec follows the stored master**, sniffed from magic bytes: a lossless
 master (PNG) encodes to VP8L, a lossy one (JPEG, WebP) to VP8. Not alpha
 presence, and not encode-both-and-keep-the-smaller.
 
-## 4. The two behaviours most likely to surprise you
+## 4. The three behaviours most likely to surprise you
+
+**EXIF Orientation is applied before geometry.** A master tagged Orientation 6
+is rotated first, and `sw x sh` are the *rotated* dimensions. Getting this
+wrong does not merely rotate the output — it computes a different scale and a
+different output box, so every downstream rule is wrong too. A 3088x2316 master
+asked to `fit w_1372,h_1029` returns 771x1029, not 1372x1029. Format-independent.
+
 
 **`fit` floors.** A 1725x1294 master fitted into 1120x840 returns **1119**x840,
 not 1120x840. Rounding instead of flooring changes roughly half of all `fit`
@@ -152,6 +165,45 @@ size read from the VP8/VP8L bitstream.
 > may add the option. Until then, if originals must not be reachable, do not
 > expose this path: restrict it at the reverse proxy, or strip metadata on
 > ingest into the master store.
+
+### 5.1 JPEG
+
+JPEG has its own encoder settings and its own quality rule, neither shared with
+WebP:
+
+    vips jpegsave IN OUT.jpg --Q <q> --interlace --subsample-mode off
+
+Progressive with libjpeg's own ten-scan progression, 4:4:4 at every quality, no
+restart markers. `--subsample-mode off` is load-bearing: libvips' `auto`
+subsamples below Q 90 and the CDN never does. Stock **libjpeg-turbo**, not
+mozjpeg — the DQT identifies the encoder as well as the quality.
+
+Quality (§7.4), which is **not** the WebP rule:
+
+| URL | Q |
+|---|---|
+| `enc_` on **every** segment | 80, `q_N` ignored |
+| `enc_` on **some** segments | 90, `q_N` ignored |
+| no `enc_` anywhere | the **last** segment's `q_N`, default 90 |
+
+The conjunction is not academic: production's
+`crop/…/fill/…,q_85,enc_avif,quality_auto` carries no `enc` on the crop segment,
+so it encodes at **90** — not the 85 it asks for, nor the 80 the flat form
+gives. `quality_N` is inert for JPEG.
+
+The container is `SOI APP1(Exif) [APP2(ICC)] DQT … EOI`, with no APP0 JFIF: the
+APP1 is replaced with the canonical 180-byte block, the XMP APP1 and every
+non-ICC APPn are dropped, and APP2 is kept verbatim. Resolution follows §8.3
+but reads the **master's JFIF density** in place of `pHYs`, which a JPEG lacks.
+
+This is the largest metadata leak of any output format if skipped — a full
+camera EXIF with an embedded thumbnail (6429 bytes on one measured master) plus
+40 KB of XMP.
+
+**Scope:** these settings reproduce JPEG from a **JPEG master**, which is what
+production does. A **PNG master** requested as `.jpg` also returns JPEG, and
+they do *not* reproduce it — 1/35, with quality mispredicted on 20. No
+production url does this.
 
 ## 6. Access control
 
@@ -298,13 +350,21 @@ Against live CDN output, on the master render path:
 | `usm` | 685 / 685 |
 | WebP VP8 (lossy) | 36 / 36 — whole-file |
 | WebP VP8L (lossless) | 48 / 48 — whole-file |
+| JPEG, from a JPEG master | specified and measured upstream; see the scorecard |
 
 **Not verified.** Treat these as best-effort, implemented from the specification
 rather than measured:
 
-- **AVIF** — the negotiation that selects it is exact; the encoder settings were
-  never compared against the CDN.
-- **JPEG output** — never scored.
+- **AVIF** — the negotiation that selects it is exact; the encoder settings are
+  still under analysis and are not reproduced here.
+- **JPEG from a PNG master.** §7.4's settings reproduce JPEG from a JPEG master,
+  not from a PNG one (1/35 upstream, quality mispredicted on 20). Reachable via
+  a `.jpg` name with no `enc_`, but no production url does it.
+- **libjpeg-turbo version.** This fork links **3.2.0** (upstream imgproxy's pin)
+  where the reference image carries **2.1.5**. §7.4's requirement is stock
+  libjpeg-turbo rather than mozjpeg, and the Annex K tables and quality formula
+  should be stable across that jump — but a major version bump could move the
+  coded stream, and this has not been checked against CDN bytes.
 - **`blur_N`** — one image, one sigma.
 - **`fp_<x>_<y>`** other than `0.50_0.50`. Whether `fp`'s presence changes the
   rounding the way `al`'s does is untested.

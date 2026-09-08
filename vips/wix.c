@@ -60,6 +60,18 @@ vips_reset_resolution_wix(VipsImage *in, VipsImage **out)
   return vips_copy(in, out, "xres", 1.0, "yres", 1.0, NULL);
 }
 
+int
+vips_autorot_wix(VipsImage *in, VipsImage **out)
+{
+  if (vips_autorot(in, out, NULL))
+    return 1;
+
+  // autorot leaves the tag behind; strip it so a later autorot (or a saver
+  // that honours it) cannot rotate a second time.
+  vips_autorot_remove_angle(*out);
+  return 0;
+}
+
 double
 vips_xres_wix(VipsImage *in)
 {
@@ -111,8 +123,13 @@ vips_avifsave_wix(VipsImage *in, VipsTarget *target, int Q, int effort)
 int
 vips_jpegsave_wix(VipsImage *in, VipsTarget *target, int Q)
 {
-  // Never scored against the CDN. OP-SPEC §11.
-  return vips_jpegsave_target(in, target, "Q", Q, NULL);
+  // optimize_coding is deliberately absent: libjpeg optimises progressive
+  // scans anyway, so setting it changes nothing.
+  return vips_jpegsave_target(in, target,
+      "Q", Q,
+      "interlace", TRUE,
+      "subsample_mode", VIPS_FOREIGN_SUBSAMPLE_OFF,
+      NULL);
 }
 
 int

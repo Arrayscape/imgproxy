@@ -79,6 +79,13 @@ func NewSource(img *vips.Image, data imagedata.ImageData) (*Source, error) {
 		return nil, fmt.Errorf("wix: cannot decode master: %w", err)
 	}
 
+	// §4.0 -- BEFORE any dimension is read. Rotating late would not merely
+	// rotate the output: sw x sh feed the scale and the output box, so every
+	// downstream rule would be computed from the wrong numbers.
+	if err := img.WixAutorot(); err != nil {
+		return nil, fmt.Errorf("wix: autorot: %w", err)
+	}
+
 	format := wixspec.StoredFormat(head)
 	if !wixspec.MasterFormatSupported(format) {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedMasterFormat, format)

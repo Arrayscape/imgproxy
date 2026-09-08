@@ -28,6 +28,7 @@ const (
 	wixJPEG  = "0a7ba9_cccccccccccccccccccccccccccccccc~mv2.jpg"
 	wixLeaky = "0a7ba9_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee~mv2.png"
 	wixICC   = "0a7ba9_ffffffffffffffffffffffffffffffff~mv2.png"
+	wixRot   = "0a7ba9_60000000000000000000000000000000~mv2.jpg"
 )
 
 // The masters are 512x392 -- an EVEN source dimension on both axes, which is
@@ -64,6 +65,10 @@ func (s *WixHandlerTestSuite) SetupSuite() {
 	s.masterProfile = prof
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixICC),
 		withICCProfile(gradientPNG(false), prof), 0o644))
+
+	// A landscape master tagged EXIF Orientation 6 (rotate 90° CW), so the
+	// rotated dimensions differ from the stored ones. See §4.0.
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixRot), orientedJPEG(6), 0o644))
 }
 
 func (s *WixHandlerTestSuite) TearDownSuite() {
@@ -460,6 +465,39 @@ func (s *WixHandlerTestSuite) TestUnprofiledMasterIsLeftAlone() {
 	s.False(ok, "an unprofiled master must not gain a profile")
 }
 
+func (s *WixHandlerTestSuite) TestOrientationIsAppliedBeforeGeometry() {
+	// OP-SPEC §4.0. Getting this wrong does not merely rotate the output: sw x
+	// sh feed the scale and the output box, so a `fit` box that the stored
+	// (landscape) size would fill exactly is instead limited by the rotated
+	// (portrait) height, giving a different size entirely.
+	//
+	// Master is 512x392 landscape, tagged Orientation 6, so it is 392x512
+	// portrait once rotated. fit w_512,h_512:
+	//   stored size  -> scale 1.0,     512x392   WRONG
+	//   rotated size -> scale 1.0,     392x512
+	code, _, body := s.get(wixRot + "/v1/fit/w_512,h_512/x.png")
+	s.Require().Equal(http.StatusOK, code)
+
+	w, h := s.dims(body)
+	s.Equal(392, w, "width must come from the ROTATED master")
+	s.Equal(512, h)
+	s.Greater(h, w, "an Orientation 6 landscape master renders portrait")
+}
+
+func (s *WixHandlerTestSuite) TestOrientationChangesTheComputedScale() {
+	// The sharper version of the same rule: with a non-square box, the stored
+	// and rotated sizes select different scales, so the output box differs --
+	// not just its orientation.
+	code, _, body := s.get(wixRot + "/v1/fit/w_200,h_100/x.png")
+	s.Require().Equal(http.StatusOK, code)
+
+	w, h := s.dims(body)
+	// rotated 392x512 into 200x100: scale = min(200/392, 100/512) = 0.195312
+	// -> floor(392*0.195312)=76, floor(512*0.195312)=100
+	s.Equal(76, w)
+	s.Equal(100, h)
+}
+
 func TestWixHandler(t *testing.T) {
 	suite.Run(t, new(WixHandlerTestSuite))
 }
@@ -488,6 +526,36 @@ func gradientPNG(alpha bool) []byte {
 	var b bytes.Buffer
 	_ = png.Encode(&b, img)
 	return b.Bytes()
+}
+
+// orientedJPEG builds a landscape JPEG carrying an EXIF Orientation tag.
+func orientedJPEG(orientation uint16) []byte {
+	base := gradientJPEG()
+
+	var e bytes.Buffer
+	le := binary.LittleEndian
+	e.WriteString("II")
+	_ = binary.Write(&e, le, uint16(42))
+	_ = binary.Write(&e, le, uint32(8))
+	_ = binary.Write(&e, le, uint16(1))
+	_ = binary.Write(&e, le, uint16(0x0112)) // Orientation
+	_ = binary.Write(&e, le, uint16(3))      // SHORT
+	_ = binary.Write(&e, le, uint32(1))
+	_ = binary.Write(&e, le, orientation)
+	_ = binary.Write(&e, le, uint16(0))
+	_ = binary.Write(&e, le, uint32(0))
+
+	app1 := append([]byte("Exif\x00\x00"), e.Bytes()...)
+
+	var out bytes.Buffer
+	out.Write(base[:2]) // SOI
+	out.Write([]byte{0xFF, 0xE1})
+	var n [2]byte
+	binary.BigEndian.PutUint16(n[:], uint16(len(app1)+2))
+	out.Write(n[:])
+	out.Write(app1)
+	out.Write(base[2:])
+	return out.Bytes()
 }
 
 func gradientJPEG() []byte {

@@ -37,11 +37,7 @@ func Encode(
 		return img.WixSaveAVIF(enc.Quality, avifEffort)
 
 	case imagetype.JPEG:
-		// Never scored against the CDN.
-		if err := stripForLossy(img); err != nil {
-			return nil, err
-		}
-		return img.WixSaveJPEG(enc.Quality)
+		return encodeJPEG(img, src, enc)
 	}
 
 	// Everything else -- TIFF, GIF, BMP, ICO, JXL. §4 says output falls back to
@@ -112,6 +108,35 @@ func encodeWebP(img *vips.Image, src *Source, enc wixspec.Encoding) (imagedata.I
 	}
 
 	return imagedata.NewFromBytesWithFormat(imagetype.WEBP, fixed), nil
+}
+
+// encodeJPEG saves and then applies the §8.5 container fix-ups.
+//
+// Quality follows §7.4's rule, which is deliberately NOT §7.2's WebP rule.
+func encodeJPEG(img *vips.Image, src *Source, enc wixspec.Encoding) (imagedata.ImageData, error) {
+	w, h := img.Width(), img.Height()
+
+	if err := stripForLossy(img); err != nil {
+		return nil, err
+	}
+
+	d, err := img.WixSaveJPEG(enc.JPEGQuality())
+	if err != nil {
+		return nil, fmt.Errorf("wix: jpegsave: %w", err)
+	}
+	defer d.Close()
+
+	raw, err := io.ReadAll(d.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("wix: reading encoded jpeg: %w", err)
+	}
+
+	fixed, err := wixspec.FinalizeJPEG(raw, src.Head, w, h)
+	if err != nil {
+		return nil, fmt.Errorf("wix: jpeg finalize: %w", err)
+	}
+
+	return imagedata.NewFromBytesWithFormat(imagetype.JPEG, fixed), nil
 }
 
 // encodePNG saves with libvips' own defaults, then applies the container

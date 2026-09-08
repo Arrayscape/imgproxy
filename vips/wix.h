@@ -46,6 +46,12 @@ int vips_gaussblur_wix(VipsImage *in, VipsImage **out, double sigma);
 // from a master render (WIX-URL-SPEC §6.1).
 int vips_reset_resolution_wix(VipsImage *in, VipsImage **out);
 
+// Apply EXIF Orientation, and remove the tag so it cannot be applied twice.
+// OP-SPEC §4.0: this must run before ANY dimension is read -- sw x sh are the
+// rotated dimensions, so getting it wrong computes a different scale and a
+// different output box, not merely a rotated image.
+int vips_autorot_wix(VipsImage *in, VipsImage **out);
+
 // Image resolution in pixels/mm, as pngsave would encode into pHYs. WebP has
 // no pHYs chunk, so the §8.3 resolution precedence needs it from the image.
 double vips_xres_wix(VipsImage *in);
@@ -55,6 +61,11 @@ int vips_pngsave_wix(VipsImage *in, VipsTarget *target);
 int vips_webpsave_wix(VipsImage *in, VipsTarget *target,
     int Q, int lossless, int near_lossless, int near_lossless_level);
 int vips_avifsave_wix(VipsImage *in, VipsTarget *target, int Q, int effort);
+// §7.4: progressive with libjpeg's own ten-scan jpeg_simple_progression, and
+// 4:4:4 at every quality. subsample-mode off is load-bearing -- libvips' `auto`
+// subsamples below Q 90 and the CDN never does. Annex K tables scaled by
+// libjpeg's quality formula, so the DQT identifies the encoder as well as the
+// quality: this must be stock libjpeg-turbo, not mozjpeg.
 int vips_jpegsave_wix(VipsImage *in, VipsTarget *target, int Q);
 
 // Runtime assertion that docker/wix/0002 is present in the linked libvips.

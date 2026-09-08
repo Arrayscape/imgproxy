@@ -300,7 +300,7 @@ func (h *Handler) render(
 		// fallback format, so it is part of the key even on a cache hit.
 		lossy, format, ok := h.cachedMasterFacts(r.MediaID)
 		if ok {
-			out := wixspec.Negotiate(enc.Enc, accept, format, h.config.AVIF)
+			out := wixspec.Negotiate(enc.Enc, accept, r.Filename, format, h.config.AVIF)
 			key := h.key(r.MediaID, plan, fx, enc, out, lossy)
 
 			if e, hit := h.cache.Get(key); hit {
@@ -358,7 +358,7 @@ func (h *Handler) renderFromMaster(
 		return nil, "", err
 	}
 
-	format := wixspec.Negotiate(enc.Enc, accept, src.Format, h.config.AVIF)
+	format := wixspec.Negotiate(enc.Enc, accept, r.Filename, src.Format, h.config.AVIF)
 	if format == imagetype.Unknown {
 		return nil, "", fmt.Errorf("wix: could not determine the stored master's format")
 	}

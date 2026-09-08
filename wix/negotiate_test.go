@@ -10,24 +10,48 @@ import (
 func TestNegotiateMatchesTheSpecTable(t *testing.T) {
 	// WIX-URL-SPEC §4, verbatim.
 	for _, c := range []struct {
-		name   string
-		enc    bool
-		accept string
-		master imagetype.Type
-		want   imagetype.Type
+		name     string
+		enc      bool
+		accept   string
+		filename string
+		master   imagetype.Type
+		want     imagetype.Type
 	}{
-		{"enc + */*", true, "*/*", imagetype.PNG, imagetype.PNG},
-		{"enc + avif,webp,*/*", true, "image/avif,image/webp,*/*", imagetype.PNG, imagetype.AVIF},
-		{"enc + webp,*/*", true, "image/webp,*/*", imagetype.PNG, imagetype.WEBP},
-		{"enc + image/png", true, "image/png", imagetype.PNG, imagetype.PNG},
-		{"no enc + avif,webp", false, "image/avif,image/webp,*/*", imagetype.PNG, imagetype.PNG},
+		{"enc + */*", true, "*/*", "z.png", imagetype.PNG, imagetype.PNG},
+		{"enc + avif,webp,*/*", true, "image/avif,image/webp,*/*", "z.png", imagetype.PNG, imagetype.AVIF},
+		{"enc + webp,*/*", true, "image/webp,*/*", "z.png", imagetype.PNG, imagetype.WEBP},
+		{"enc + image/png", true, "image/png", "z.png", imagetype.PNG, imagetype.PNG},
 		// "master's format" means the STORED format, so a JPEG master falls
 		// back to JPEG rather than to any global default.
-		{"enc + */* on a jpeg master", true, "*/*", imagetype.JPEG, imagetype.JPEG},
-		{"no enc on a jpeg master", false, "image/webp", imagetype.JPEG, imagetype.JPEG},
+		{"enc + */* on a jpeg master", true, "*/*", "z.jpg", imagetype.JPEG, imagetype.JPEG},
+		// With enc_, the filename is ignored: Accept decides.
+		{"enc + jpg name, webp accepted", true, "image/webp,*/*", "z.jpg", imagetype.PNG, imagetype.WEBP},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			require.Equal(t, c.want, Negotiate(c.enc, c.accept, c.master, true))
+			require.Equal(t, c.want, Negotiate(c.enc, c.accept, c.filename, c.master, true))
+		})
+	}
+}
+
+func TestNegotiateWithoutEncTheFilenameDecides(t *testing.T) {
+	// §4.1, measured on a png master. Accept is ignored ENTIRELY, and a PNG
+	// master really does serve JPEG when the url asks for .jpg and opts out.
+	for _, c := range []struct {
+		filename, accept string
+		master, want     imagetype.Type
+	}{
+		{"z.png", "image/jpeg", imagetype.PNG, imagetype.PNG},
+		{"z.jpg", "image/png", imagetype.PNG, imagetype.JPEG},
+		{"z.jpg", "image/jpeg", imagetype.PNG, imagetype.JPEG},
+		{"z.webp", "image/webp,*/*", imagetype.PNG, imagetype.WEBP},
+		// An unrecognised or absent extension falls back to the master.
+		{"z.bogus", "*/*", imagetype.PNG, imagetype.PNG},
+		{"z", "*/*", imagetype.JPEG, imagetype.JPEG},
+		{"", "*/*", imagetype.WEBP, imagetype.WEBP},
+	} {
+		t.Run(c.filename+" accept="+c.accept, func(t *testing.T) {
+			require.Equal(t, c.want,
+				Negotiate(false, c.accept, c.filename, c.master, true))
 		})
 	}
 }
@@ -35,7 +59,7 @@ func TestNegotiateMatchesTheSpecTable(t *testing.T) {
 func TestNegotiateAVIFCanBeDisabled(t *testing.T) {
 	// The AVIF encoder settings were never compared against the CDN, so an
 	// operator can fall back to webp without losing negotiation entirely.
-	got := Negotiate(true, "image/avif,image/webp,*/*", imagetype.PNG, false)
+	got := Negotiate(true, "image/avif,image/webp,*/*", "z.png", imagetype.PNG, false)
 	require.Equal(t, imagetype.WEBP, got)
 }
 
