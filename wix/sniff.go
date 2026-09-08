@@ -94,25 +94,40 @@ const (
 	DispositionUnreachable
 )
 
-// FormatDisposition classifies a sniffed master format. OP-SPEC §9.1:
+// FormatDisposition classifies a sniffed master format. OP-SPEC §9.1 and the
+// scorecard's input-format table, every row measured against the live upload
+// API:
 //
-//	transcoded at ingest        TIFF, HEIC/HEIF, BMP   -> unreachable
-//	passed through untransformed GIF                    -> pass through
-//	kept verbatim and decoded    AVIF                   -> transform
-//	rejected                     JPEG XL                -> unreachable
+//	stored verbatim, decoded      JPEG, PNG, WebP, AVIF   -> transform
+//	passed through untransformed  GIF                     -> pass through
+//	transcoded at ingest to PNG   TIFF, HEIC/HEIF, BMP    -> unreachable
+//	transcoded at ingest to JPEG  JPEG 2000               -> unreachable
+//	demosaiced at ingest to JPEG  RAW                     -> unreachable
+//	routed out of /media entirely SVG                     -> unreachable
+//	rejected at ingest            JPEG XL                 -> unreachable
 //
-// The transcoded formats survive at their own extension but no production url
-// points at them; the canonical id is always the `~mv2.png` derivative. AVIF is
-// the one that genuinely needs a decoder on the transform path -- one the
-// reference fork lacks and this build has.
+// The transcoded and demosaiced formats survive at their own extension but the
+// canonical id is always the derivative, so no production url points a
+// transform at them. SVG never enters the raster pipeline at all: it is routed
+// by content into a separate `shapes` subsystem with no `~mv2` infix, and both
+// plausible transform routes answer 403.
+//
+// AVIF is the one format kept verbatim that genuinely needs a decoder on the
+// transform path -- one the reference build lacks and this fork's base has.
+//
+// Anything unrecognised is unreachable too. JPEG 2000 and RAW land here rather
+// than in a case of their own, because imgproxy has no type for either and
+// their ingest disposition makes them unreachable regardless; refusing up front
+// beats failing later with a confusing error from the decoder.
 func FormatDisposition(t imagetype.Type) Disposition {
 	switch t {
 	case imagetype.GIF:
 		return DispositionPassThrough
-	case imagetype.TIFF, imagetype.HEIC, imagetype.BMP, imagetype.JXL:
-		return DispositionUnreachable
+
+	case imagetype.JPEG, imagetype.PNG, imagetype.WEBP, imagetype.AVIF:
+		return DispositionTransform
 	}
-	return DispositionTransform
+	return DispositionUnreachable
 }
 
 // MasterFormatSupported reports whether the Wix path will decode and transform

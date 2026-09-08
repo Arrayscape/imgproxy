@@ -117,3 +117,38 @@ func TestUSMSigmaAbove10FallsBack(t *testing.T) {
 	require.Equal(t, 0.5, (&USM{Sigma: 15}).EffectiveSigma())
 	require.Equal(t, 9.0, (&USM{Sigma: 9}).EffectiveSigma())
 }
+
+func TestFormatDispositionCoversEveryIngestOutcome(t *testing.T) {
+	// The scorecard's input-format table, every row measured against the live
+	// upload API. An accepted-but-transcoded format is unreachable on the
+	// transform path just as firmly as a rejected one.
+	for _, c := range []struct {
+		name string
+		t    imagetype.Type
+		want Disposition
+	}{
+		{"jpeg stored verbatim", imagetype.JPEG, DispositionTransform},
+		{"png stored verbatim", imagetype.PNG, DispositionTransform},
+		{"webp stored verbatim", imagetype.WEBP, DispositionTransform},
+		{"avif kept verbatim, decoded", imagetype.AVIF, DispositionTransform},
+
+		{"gif passed through", imagetype.GIF, DispositionPassThrough},
+
+		{"tiff transcoded to png", imagetype.TIFF, DispositionUnreachable},
+		{"heic transcoded to png", imagetype.HEIC, DispositionUnreachable},
+		{"bmp transcoded to png", imagetype.BMP, DispositionUnreachable},
+		{"jxl rejected", imagetype.JXL, DispositionUnreachable},
+		{"svg routed out of /media", imagetype.SVG, DispositionUnreachable},
+		{"ico not an accepted upload", imagetype.ICO, DispositionUnreachable},
+
+		// JPEG 2000 and RAW have no imgproxy type and sniff as Unknown. Both
+		// are transcoded at ingest, so unreachable is the right answer anyway
+		// -- and refusing up front beats a confusing decoder error later.
+		{"unrecognised", imagetype.Unknown, DispositionUnreachable},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, FormatDisposition(c.t))
+			require.Equal(t, c.want != DispositionUnreachable, MasterFormatSupported(c.t))
+		})
+	}
+}

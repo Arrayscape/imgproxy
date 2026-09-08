@@ -354,49 +354,51 @@ CDN — see `IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS` in §1.
 
 ## 9. Master formats
 
-OP-SPEC §9.1 measured the real upload API, one probe per format, and sorts
-accepted formats into dispositions that decide what the transform path must do.
-Ingest sniffs **content**, not the extension, and so does this fork.
+Every format Wix's docs list has been probed against the live upload API, and
+the disposition decides what the transform path must do. Ingest sniffs
+**content**, not the extension, and so does this fork.
 
-| Master | Disposition | What we do |
+| Master | Ingest disposition | What we do |
 |---|---|---|
 | JPEG, PNG, WebP | stored verbatim | decode, transform, encode |
 | **AVIF** | kept verbatim, needs a decoder | decode, transform, encode |
-| **GIF** | passed through untransformed | **serve the stored bytes** — see below |
-| TIFF, HEIC/HEIF, BMP | transcoded at ingest | refuse (422) |
+| **GIF** | passed through untransformed | **serve the stored bytes** |
+| TIFF, HEIC/HEIF, BMP | transcoded to a PNG derivative | refuse (422) |
+| JPEG 2000 | transcoded to a JPEG derivative | refuse (422) |
+| RAW | demosaiced to a JPEG derivative | refuse (422) |
+| SVG | routed out of `/media` entirely | refuse (422) |
 | JPEG XL | rejected at ingest | refuse (422) |
+| anything unrecognised | — | refuse (422) |
 
 **GIF is not transformed.** Ingest stores it verbatim and the media router
 answers rather than the image manipulator, so `w_180,h_135` returns the
 FULL-SIZE original — which is also how animation survives. We serve the stored
-bytes with `Content-Type: image/gif`, deciding before decode because there is
-nothing to decode. Tests assert that `fit`, `fill`, chained `crop`, `usm` and
-`blur` all leave the bytes untouched.
+bytes with `Content-Type: image/gif`, decided before decode because there is
+nothing to decode.
 
-**AVIF masters need a real decoder**, and their canonical id stays `~mv2.avif`
-with no PNG sibling. The reference build (`arrayscape/vips-wix:fork`) has no
-libheif and cannot open one at all; this fork's base does, so an AVIF master
-decodes and renders rather than erroring.
+**AVIF is the only format that leaves an outstanding obligation.** It is kept
+verbatim and genuinely decoded, so an AVIF master needs a real decoder. The
+reference build has no libheif and cannot open one; this fork's base can, so an
+AVIF master decodes and renders rather than erroring. That is a prerequisite,
+**not** byte-exactness: decode measures **3/12** whole-file, with the residual
+in the YCbCr→RGB matrix step (`matrix=0` exact, `matrix=6` — BT.601, what real
+cameras emit — off by ±1..5). Zero AVIF masters in the corpus, so no production
+impact today.
 
-That is a prerequisite, **not** a claim of byte-exactness. A libvips+libheif
-build measures **3/12 whole-file byte-exact**, and the residual is in the
-*decode* — proved on identity renditions, and sitting in the YCbCr→RGB matrix
-step: `matrix=0` is exact while `matrix=6` (BT.601, what real cameras emit) is
-off by ±1..5 on every rendition. So AVIF **input** is not reproduced, only
-supported. It is zero-impact today — the corpus contains no AVIF masters — and
-the gap is recorded in §10 rather than treated as closed.
+**The refused formats are unobservable, not unsupportable.** Whether ingest
+transcodes them (the canonical id becomes a derivative), demosaics them, routes
+them to another subsystem, or rejects them outright, no renderable master of
+them can reach the transform path — so there is no CDN behaviour to reproduce
+and rendering one would be inventing a transform.
 
-**The refused formats are unobservable, not unsupportable.** Ingest either
-transcodes them — the canonical id becomes a `~mv2.png` derivative, and no
-production url points at the original, which survives at its own extension — or
-rejects them outright. Either way no renderable master of them can exist, so
-there is no CDN behaviour to reproduce and rendering one would be inventing a
-transform. If Wix's ingest changes, `wix.FormatDisposition` is the single place
-to update; imgproxy decodes all of them already.
+Unrecognised formats are refused for the same reason plus a practical one:
+JPEG 2000 and RAW have no imgproxy type and sniff as `Unknown`, and refusing up
+front beats failing later with a confusing decoder error. If Wix's ingest
+changes, `wix.FormatDisposition` is the single place to update.
 
 Refusal is decided by **content**, matching Wix's own 406 on bytes whose
 filename and MIME type both claimed PNG. A TIFF behind a `~mv2.png` id is
-refused, and there is a test for exactly that.
+refused, and there is a test for it.
 
 ## 10. What is verified, and what is not
 
@@ -408,9 +410,10 @@ Against live CDN output, on the master render path:
 | `fill` | 433 / 433 byte-exact |
 | `crop` | 70 / 70 |
 | `usm` | 685 / 685 |
-| WebP VP8 (lossy) | 36 / 36 — whole-file |
-| WebP VP8L (lossless) | 48 / 48 — whole-file |
-| JPEG, from a JPEG master | specified and measured upstream; see the scorecard |
+| WebP VP8 (lossy) | 20 / 20 — whole-file |
+| WebP VP8L (lossless) | 29 / 29 — whole-file |
+| JPEG | 56 / 56 — whole-file |
+| AVIF | **21 / 25** — residual unexplained |
 
 **Not verified.** Treat these as best-effort, implemented from the specification
 rather than measured:
