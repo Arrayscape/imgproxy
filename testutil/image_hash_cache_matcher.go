@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -17,6 +18,18 @@ const (
 	// hashPath is a path to hash data in testdata folder
 	hashPath = "test-hashes"
 
+	// hashOverlayPathFmt is an OPTIONAL per-libvips-version overlay, consulted
+	// before hashPath.
+	//
+	// Most suites compare processed output BYTE-exactly, so pinning a different
+	// libvips changes them: this fork pins 8.15.5 to reproduce the Wix CDN
+	// (OP-SPEC.md §1), where upstream builds 8.18.x. Rather than rewrite
+	// upstream's fixtures -- which would conflict on every rebase and lose the
+	// reference for anyone building against 8.18 -- the entries that genuinely
+	// differ live in testdata/test-hashes-vips<major>.<minor>/ and win when
+	// present. Everything else still comes from upstream's set.
+	hashOverlayPathFmt = "test-hashes-vips%d.%d"
+
 	// If TEST_CREATE_MISSING_HASHES is set, matcher would create missing hash files
 	createMissingHashesEnv = "TEST_CREATE_MISSING_HASHES"
 
@@ -26,7 +39,11 @@ const (
 
 // ImageHashCacheMatcher is a helper struct for image hash comparison in tests
 type ImageHashCacheMatcher struct {
-	hashesPath          string
+	hashesPath string
+
+	// overlayPath holds hashes recorded for the linked libvips version, and is
+	// empty when there are none. See hashOverlayPathFmt.
+	overlayPath         string
 	createMissingHashes bool
 	saveTmpImagesPath   string
 	hashType            ImageHashType
@@ -38,12 +55,44 @@ func NewImageHashCacheMatcher(testDataProvider *TestDataProvider, hashType Image
 	createMissingHashes := len(os.Getenv(createMissingHashesEnv)) > 0
 	saveTmpImagesPath := os.Getenv(saveTmpImagesPathEnv)
 
+	overlayPath := testDataProvider.Path(
+		fmt.Sprintf(hashOverlayPathFmt, vipsMajorVersion(), vipsMinorVersion()))
+	if st, err := os.Stat(overlayPath); err != nil || !st.IsDir() {
+		overlayPath = ""
+	}
+
 	return &ImageHashCacheMatcher{
 		hashesPath:          hashesPath,
+		overlayPath:         overlayPath,
 		createMissingHashes: createMissingHashes,
 		saveTmpImagesPath:   saveTmpImagesPath,
 		hashType:            hashType,
 	}
+}
+
+// resolveHashPath returns the hash file to compare against: the
+// libvips-version overlay when it has an entry, otherwise upstream's.
+//
+// When creating missing hashes, a new entry is written to the overlay if one
+// exists, so a rebaseline never rewrites upstream's fixtures in place.
+func (m *ImageHashCacheMatcher) resolveHashPath(t *testing.T, key string) string {
+	t.Helper()
+
+	base := m.hashesPath
+	if m.overlayPath != "" {
+		if p := m.makeTargetPath(t, m.overlayPath, t.Name(), key, "hash"); fileExists(p) {
+			return p
+		}
+		if m.createMissingHashes {
+			base = m.overlayPath
+		}
+	}
+	return m.makeTargetPath(t, base, t.Name(), key, "hash")
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }
 
 // ImageMatches is a testing helper, which accepts image as reader, calculates
@@ -62,7 +111,7 @@ func (m *ImageHashCacheMatcher) ImageMatches(t *testing.T, img io.Reader, key st
 	sourceHash := m.calculateHash(t, buf)
 
 	// Calculate image hash path (create folder if missing)
-	hashPath := m.makeTargetPath(t, m.hashesPath, t.Name(), key, "hash")
+	hashPath := m.resolveHashPath(t, key)
 
 	// Try to read or create the hash file
 	f, err := os.Open(hashPath)

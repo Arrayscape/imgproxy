@@ -152,29 +152,81 @@ Wix URLs are unsigned, and this route is unsigned by default. Two ways to bound 
 Unsigned and unbounded, a client can request thousands of distinct sizes, each
 one a cache miss and seconds of encoding. Do one of the two.
 
-## 7. Build requirements
+## 7. Effects on imgproxy's own tests
 
-The transform depends on the libvips build, not just the code. `docker/wix/Dockerfile`
-builds it:
+Pinning libvips changes imgproxy's native pipeline output, so its golden hashes
+were rebaselined — see `testdata/test-hashes/README.md`. Regenerating all 896
+changed only 117, all resampling paths, which is a useful confirmation that the
+pin changes the resampler and little else.
 
-- **stock libvips 8.15.5** plus two patches in `docker/wix/`:
-  `0001` makes `reducev`'s line-cache tile height configurable, `0002` gives
-  `webpsave` a near-lossless level independent of `Q`.
-- `-Dorc=enabled -Dhighway=disabled`, `-ffp-contract=off`. Highway and FMA
-  contraction each change resample results in the low bits.
-- `VIPS_TILE_HEIGHT=16` at runtime. libvips defaults to 10; **running without it
-  silently produces a different transform**, so the handler refuses to start if
-  it is set to anything else.
+Two genuine incompatibilities between imgproxy v4 and libvips 8.15.5 turned up
+and are fixed in `vips/vips.c`, both version-guarded so an 8.16+ build is
+unaffected:
+
+| Loader | Property | Effect on 8.15.5 |
+|---|---|---|
+| `tiffload_source` | `unlimited` | every TIFF load failed |
+| `jxlload_source` | `page`, `n` | every JXL load failed |
+
+Neither degrades gracefully: libvips rejects an unknown property outright, so
+passing one makes that entire format unreadable rather than just disabling the
+option. `IMGPROXY_TIFF_UNLIMITED` and animated JXL are inert on 8.15.5.
+
+One capability is genuinely lost to the pin: **libvips 8.15.5 cannot decode
+ThunderScan-compressed TIFF**, where 8.18.4 can — measured on both with the same
+libtiff underneath. It costs 11 subtests on a single fixture and nothing else;
+see the test-hashes README.
+
+## 8. Build requirements
+
+The transform depends on the libvips build, not just the code, so the fork ships
+a base image. `docker/wix/build-base.sh` builds it as a **thin fork of
+imgproxy's own base image build**, not a replacement:
+
+```
+./docker/wix/build-base.sh
+docker build -f docker/Dockerfile -t imgproxy-wix .
+```
+
+Upstream's base builds every dependency from source into `/opt/imgproxy/lib`
+with `-Dmodules=disabled`, which is what lets the runtime image stay
+`ubuntu:noble` and copy a single directory. All of that is kept. The fork
+changes only what OP-SPEC.md §1 requires, against a pinned upstream commit:
+
+| Change | Why |
+|---|---|
+| libvips 8.18.5 → **8.15.5** | the resampler the CDN's output was measured against |
+| the two patches in `docker/wix/` | `0001` makes `reducev`'s line-cache tile height configurable; `0002` gives `webpsave` a near-lossless level independent of `Q` |
+| **add liborc**, `-Dorc=enabled -Dhighway=disabled` | upstream builds Highway and no ORC at all; the CDN's results come from ORC's fixed-point path, and Highway changes them in the low bits |
+| `-ffp-contract=off`, scoped to libvips | FMA contraction changes resample results |
+| `patch` added to the deps stage | upstream's build image does not ship it |
+
+Every other dependency — libjpeg, libpng, libwebp, lcms2, libtiff, libjxl, glib
+— stays at upstream's pinned version. That matters if a byte difference ever
+shows up: it narrows the cause to one library rather than a whole distro.
+
+The edits are asserted against exact upstream text and fail loudly if upstream
+moves, rather than silently building something that is not the transform.
+
+At runtime:
+
+- `VIPS_TILE_HEIGHT=16`. libvips defaults to 10; **running without it silently
+  produces a different transform**, so the handler refuses to start if it is set
+  to anything else.
 - `VIPS_NOVECTOR` must never be set — the handler refuses to start if it is.
   `VIPS_VECTOR` and `VIPS_CONCURRENCY` are both measured safe.
-- Host architecture is irrelevant given those flags: arm64 and amd64 were
+- Host architecture is irrelevant given the build flags: arm64 and amd64 were
   measured byte-identical across the whole corpus.
 
 Deliberately **not** applied: libvips#4909, the enlargement half-pixel fix. Wix
 runs stock libvips and shares the displacement, so patching it moves output
 *away* from the CDN on every enlargement.
 
-## 8. What is verified, and what is not
+Substituting the unmodified upstream base still builds, but the Wix route
+refuses to start rather than serve output that silently does not reproduce the
+CDN — see `IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS` in §1.
+
+## 9. What is verified, and what is not
 
 Against live CDN output, on the master render path:
 
@@ -215,7 +267,7 @@ rather than measured:
   our own arithmetic and is unverified against the CDN.**
 - **`lg_N`** — unexplained rather than proven inert.
 
-## 9. Coverage against WIX-URL-SPEC
+## 10. Coverage against WIX-URL-SPEC
 
 | Spec section | Status |
 |---|---|
@@ -238,7 +290,7 @@ rather than measured:
 | §7.2 originals not stripped | implemented, deliberately |
 | §7.3 colour → Wix sRGB | implemented, including on a bare `crop` |
 
-## 10. Cache-derived renditions (§6 / OP-SPEC §10)
+## 11. Cache-derived renditions (§6 / OP-SPEC §10)
 
 The CDN caches transformed output and uses it as the input to later transforms,
 which is how roughly half of a mature URL set is produced. This fork does the
@@ -301,7 +353,7 @@ so a derived rendition carries `pHYs 1000` and an `XResolution` of `25400/1000`
 derived from it, per §8.3 step 3 — which is what the CDN emits, measured on
 1307 of 1307 cache-derived renditions. The master path is unaffected.
 
-## 11. Not implemented
+## 12. Not implemented
 
 **A persistent rendition cache.** The derivation cache in §10 is in-process
 only, so it is empty after a restart and not shared between replicas. An

@@ -4,6 +4,14 @@
 #define VIPS_SCRGB_ALPHA_FIXED \
   (VIPS_MAJOR_VERSION > 8 || (VIPS_MAJOR_VERSION == 8 && VIPS_MINOR_VERSION >= 15))
 
+// Properties imgproxy passes that libvips only gained in 8.16. Passing one to
+// an older build does NOT degrade gracefully -- the operation fails outright
+// with "no property named ...", making every source of that format unreadable.
+#define VIPS_TIFFLOAD_HAS_UNLIMITED \
+  (VIPS_MAJOR_VERSION > 8 || (VIPS_MAJOR_VERSION == 8 && VIPS_MINOR_VERSION >= 16))
+#define VIPS_JXLLOAD_HAS_PAGE \
+  (VIPS_MAJOR_VERSION > 8 || (VIPS_MAJOR_VERSION == 8 && VIPS_MINOR_VERSION >= 16))
+
 #define VIPS_META_PALETTE_BITS_DEPTH "palette-bit-depth"
 
 #define IMGPROXY_META_ICC_NAME "imgproxy-icc-profile"
@@ -92,12 +100,22 @@ vips_jpegload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
 int
 vips_jxlload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoadOptions lo)
 {
+#if VIPS_JXLLOAD_HAS_PAGE
   return vips_jxlload_source(
       VIPS_SOURCE(source), out,
       "access", VIPS_ACCESS_SEQUENTIAL,
       "page", lo.Page,
       "n", lo.Pages,
       NULL);
+#else
+  // jxlload gained `page`/`n` (animated JXL) in 8.16. On 8.15 passing them
+  // fails the whole load with "no property named `page'", so every JXL source
+  // becomes unreadable -- not just animated ones. Single-page JXL still loads.
+  return vips_jxlload_source(
+      VIPS_SOURCE(source), out,
+      "access", VIPS_ACCESS_SEQUENTIAL,
+      NULL);
+#endif
 }
 
 int
@@ -171,6 +189,7 @@ vips_heifload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
 int
 vips_tiffload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoadOptions lo)
 {
+#if VIPS_TIFFLOAD_HAS_UNLIMITED
   return vips_tiffload_source(
       VIPS_SOURCE(source), out,
       "access", VIPS_ACCESS_SEQUENTIAL,
@@ -178,6 +197,21 @@ vips_tiffload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
       "n", lo.Pages,
       "unlimited", lo.TiffUnlimited,
       NULL);
+#else
+  // pngload and svgload have had `unlimited` since 8.15, but tiffload only
+  // gained it in 8.16. Passing it to an 8.15 build is not a no-op: the
+  // operation fails outright with "no property named `unlimited'", which
+  // breaks EVERY tiff load rather than just the unlimited case.
+  //
+  // IMGPROXY_TIFF_UNLIMITED therefore has no effect on 8.15; the load itself
+  // still works.
+  return vips_tiffload_source(
+      VIPS_SOURCE(source), out,
+      "access", VIPS_ACCESS_SEQUENTIAL,
+      "page", lo.Page,
+      "n", lo.Pages,
+      NULL);
+#endif
 }
 
 int

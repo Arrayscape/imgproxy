@@ -61,7 +61,25 @@ func Encode(
 		return img.WixSaveJPEG(enc.Quality)
 	}
 
-	return nil, fmt.Errorf("wix: cannot encode to %s", format)
+	// Everything else -- TIFF, GIF, BMP, ICO, JXL. §4 says output falls back to
+	// the STORED master's format when `enc` is absent, and a master can be any
+	// format the decoder handles: WIX-URL-SPEC §1.1's png/jpeg/webp split
+	// describes one site's 366 masters, not a limit on the CDN.
+	//
+	// There is no measured CDN behaviour for these, so rather than invent
+	// encoder settings they go through imgproxy's own saver with its defaults.
+	// Documented as pass-through in WIXEMU.md.
+	if !vips.SupportsSave(format) {
+		// A vector or otherwise unsaveable master still has to produce
+		// something; PNG is the lossless default the rest of the pipeline
+		// already targets.
+		format = imagetype.PNG
+		return encodePNG(img, src)
+	}
+	if err := stripForLossy(img); err != nil {
+		return nil, err
+	}
+	return img.Save(format, enc.Quality, nil)
 }
 
 // encodePNG saves with libvips' own defaults, then applies the container

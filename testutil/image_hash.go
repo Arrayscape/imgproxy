@@ -277,3 +277,9 @@ func (h *ImageHash) calcSha256Hash(buf []byte) error {
 
 	return nil
 }
+
+// vipsMajorVersion and vipsMinorVersion report the linked libvips version, so
+// hash comparisons can select fixtures recorded for it. See
+// hashOverlayPathFmt in image_hash_cache_matcher.go.
+func vipsMajorVersion() int { return int(C.vips_version(0)) }
+func vipsMinorVersion() int { return int(C.vips_version(1)) }
