@@ -1,6 +1,6 @@
 # Built by docker/wix/build-base.sh: imgproxy's own base image build, forked to
-# change libvips only -- 8.15.5 with the two OP-SPEC.md §1 patches, the ORC
-# vector path instead of Highway, and no floating-point contraction. Every other
+# change libvips only -- 8.15.5 with the OP-SPEC.md §1 patch, the ORC vector
+# path instead of Highway, and no floating-point contraction. Every other
 # dependency stays at upstream's pinned version.
 #
 # Substituting the unmodified upstream base still builds and runs, but the Wix
@@ -10,7 +10,7 @@
 #   --build-arg BASE_IMAGE=ghcr.io/imgproxy/imgproxy-base
 #   --build-arg BASE_IMAGE_VERSION=v4.1.5
 ARG BASE_IMAGE="ghcr.io/arrayscape/imgproxy-base-wix"
-ARG BASE_IMAGE_VERSION="v4.1.5-vips8.15.5-wix1"
+ARG BASE_IMAGE_VERSION="v4.1.5-vips8.15.5-wix2"
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_VERSION} AS build
 
@@ -82,15 +82,6 @@ ENV AWS_LWA_ASYNC_INIT="true"
 
 # Disable SVE on ARM64. SVE is slower than NEON on Amazon Graviton 3
 ENV VIPS_VECTOR=167772160
-
-# REQUIRED by the Wix transform, and part of it rather than a tuning knob:
-# reducev accumulates Y within a strip and restarts at each boundary, so the
-# strip height decides which output rows land on a phase tie. libvips hardcodes
-# 10; the CDN behaves as 16. Running without it silently produces a different
-# transform. See OP-SPEC.md §2.
-#
-# Only has an effect on a libvips carrying docker/wix/0001; harmless otherwise.
-ENV VIPS_TILE_HEIGHT=16
 
 # VIPS_NOVECTOR must NEVER be set: it disables the ORC vector path and changes
 # 6 of 12 measured renditions. The Wix handler refuses to start if it is.

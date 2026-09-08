@@ -8,7 +8,7 @@
 # all of that and change only what OP-SPEC.md §1 requires of libvips:
 #
 #   1. libvips 8.15.5 instead of 8.18.5
-#   2. the two reducev / webpsave patches
+#   2. the webpsave near-lossless-level patch
 #   3. the ORC vector path instead of Highway
 #   4. -ffp-contract=off for the libvips compile
 #
@@ -64,8 +64,7 @@ PY
 
 # --- 2. the two libvips patches ---------------------------------------------
 # Upstream's Dockerfile already does `COPY ... *.patch ./` into /root.
-cp "$HERE"/0001-reducev-configurable-tile-height.patch \
-   "$HERE"/0002-webpsave-separate-near-lossless-level.patch .
+cp "$HERE"/0002-webpsave-separate-near-lossless-level.patch .
 
 # --- 3. `patch`, which upstream's deps stage does not install ----------------
 require Dockerfile "    nasm \\"
@@ -135,8 +134,9 @@ new = orc + '''print_build_stage vips $VIPS_VERSION
 cd $DEPS_SRC/vips
 # -Ddocs was only added in 8.16; 8.15.5 spells it -Dgtk_doc/-Ddoxygen, both
 # off by default in a release tarball, so the option is simply dropped.
-# OP-SPEC.md §1: both patches are part of the transform.
-patch -p1 < /root/0001-reducev-configurable-tile-height.patch
+# OP-SPEC.md §1. The reducev tile-height patch this build used to carry is
+# gone: it only mattered under sequential access, and the pipeline now opens
+# images with access=random (§2), which removes the line cache entirely.
 patch -p1 < /root/0002-webpsave-separate-near-lossless-level.patch
 # -ffp-contract=off is scoped to libvips: FMA contraction changes resample
 # results, and the reference build applies it to libvips only.
@@ -158,7 +158,7 @@ PY
 echo "==> fork applied:"
 echo "    libvips  $(grep '^export VIPS_VERSION=' versions.sh | cut -d= -f2)"
 echo "    orc      $(grep '^export ORC_VERSION=' versions.sh | cut -d= -f2)"
-echo "    patches  0001 0002, -Dorc=enabled -Dhighway=disabled, -ffp-contract=off"
+echo "    patch    0002, -Dorc=enabled -Dhighway=disabled, -ffp-contract=off"
 echo "==> building ${TAG}"
 docker build -t "$TAG" .
 echo "==> built ${TAG}"

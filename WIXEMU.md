@@ -35,7 +35,6 @@ IMGPROXY_LOCAL_FILESYSTEM_ROOT=/masters
 | `IMGPROXY_WIX_AVIF` | `true` | Enables the AVIF branch of format negotiation |
 | `IMGPROXY_WIX_AVIF_SPEED` | `8` | `effort = 9 - speed` |
 | `IMGPROXY_WIX_SIGNATURE_MODE` | `off` | `off` or `query` (see §6) |
-| `IMGPROXY_WIX_ALLOW_WRONG_TILE_HEIGHT` | `false` | Permits a `VIPS_TILE_HEIGHT` other than 16 |
 
 The route registers ahead of imgproxy's catch-all, so both grammars coexist.
 
@@ -196,10 +195,11 @@ changes only what OP-SPEC.md §1 requires, against a pinned upstream commit:
 | Change | Why |
 |---|---|
 | libvips 8.18.5 → **8.15.5** | the resampler the CDN's output was measured against |
-| the two patches in `docker/wix/` | `0001` makes `reducev`'s line-cache tile height configurable; `0002` gives `webpsave` a near-lossless level independent of `Q` |
+| one patch in `docker/wix/` | `0002` gives `webpsave` a near-lossless level independent of `Q` |
 | **add liborc**, `-Dorc=enabled -Dhighway=disabled` | upstream builds Highway and no ORC at all; the CDN's results come from ORC's fixed-point path, and Highway changes them in the low bits |
 | `-ffp-contract=off`, scoped to libvips | FMA contraction changes resample results |
 | `patch` added to the deps stage | upstream's build image does not ship it |
+| `-Ddocs` dropped | 8.15.5 spells it `-Dgtk_doc`/`-Ddoxygen`, both off by default |
 
 Every other dependency — libjpeg, libpng, libwebp, lcms2, libtiff, libjxl, glib
 — stays at upstream's pinned version. That matters if a byte difference ever
@@ -210,11 +210,20 @@ moves, rather than silently building something that is not the transform.
 
 At runtime:
 
-- `VIPS_TILE_HEIGHT=16`. libvips defaults to 10; **running without it silently
-  produces a different transform**, so the handler refuses to start if it is set
-  to anything else.
+- **Images are opened with `access=random`.** OP-SPEC §2 calls this "the single
+  most important rule in this document after the geometry". Under sequential
+  access `reducev` sits behind a line cache whose strip height decides which
+  output rows land on a phase tie, so the result depends both on that height
+  *and* on what consumes the resize — chaining a sharpen after it moves the
+  strip boundaries and changes the output, which is why no single tile height
+  could satisfy both the plain and the sharpened path. Random access removes
+  the cache and is byte-exact on both.
+- **No environment variables are required.** `VIPS_TILE_HEIGHT` is irrelevant
+  under random access and is no longer set or checked.
 - `VIPS_NOVECTOR` must never be set — the handler refuses to start if it is.
   `VIPS_VECTOR` and `VIPS_CONCURRENCY` are both measured safe.
+- The pipeline is chained lazily; nothing materialises an intermediate, because
+  that would break the demand coupling `reducev` depends on (OP-SPEC §5).
 - Host architecture is irrelevant given the build flags: arm64 and amd64 were
   measured byte-identical across the whole corpus.
 

@@ -55,16 +55,10 @@ func Render(img *vips.Image, src *Source, plan wixspec.Plan, fx wixspec.Effects,
 		}
 	}
 
-	// The sequential hint is what makes the patched reducev install a line
-	// cache sized from VIPS_TILE_HEIGHT. Anything that materialises the
-	// pipeline before this point drops it and silently changes the transform,
-	// so the pipeline above must never call CopyMemory.
-	if !img.IsSequential() {
-		return fmt.Errorf(
-			"wix: pipeline was materialised before the resize, so reducev will " +
-				"ignore VIPS_TILE_HEIGHT and render a different transform")
-	}
-
+	// Everything above is chained lazily -- nothing materialises an
+	// intermediate. Beyond the wasted copies, materialising would break the
+	// demand coupling that decides reducev's strip boundaries (OP-SPEC §5), so
+	// this path must never call CopyMemory.
 	if err := img.WixResize(plan.S); err != nil {
 		return fmt.Errorf("wix: resize(%v): %w", plan.S, err)
 	}

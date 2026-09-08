@@ -1,6 +1,13 @@
 #include <vips/vips.h>
 
 typedef struct _ImgproxyLoadOptions {
+  // Access mode. SEQUENTIAL by default, which is what the streaming pipeline
+  // wants. RANDOM is required by the Wix reproduction: reducev puts a
+  // sequential input behind a line cache whose strip height changes which
+  // output rows land on a phase tie, so under SEQUENTIAL the result depends on
+  // the strip height AND on what consumes the resize. See OP-SPEC.md §2.
+  VipsAccess Access;
+
   double Shrink;      // Shrink-on-load factor. 1.0 means no shrinking.
   gboolean Thumbnail; // Whether to load thumbnail (for heif).
 

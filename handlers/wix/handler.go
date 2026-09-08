@@ -79,7 +79,7 @@ func New(hCtx HandlerContext, config *Config) (*Handler, error) {
 
 	// OP-SPEC §2: refuse to start rather than silently render a different
 	// transform.
-	warnings, err := vips.CheckWixEnvironment(config.AllowWrongTileHeight, config.AllowUnverifiedLibvips)
+	warnings, err := vips.CheckWixEnvironment(config.AllowUnverifiedLibvips)
 	if err != nil {
 		return nil, err
 	}

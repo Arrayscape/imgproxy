@@ -266,7 +266,7 @@ func (img *Image) Load(
 	source := newVipsImgproxySource(imgdata.Reader())
 	defer C.unref_imgproxy_source(source)
 
-	lo := newLoadOptions(shrink, page, pages)
+	lo := newLoadOptionsAccess(loadAccess(imgdata), shrink, page, pages)
 
 	err := C.int(0) //nolint:wastedassign
 

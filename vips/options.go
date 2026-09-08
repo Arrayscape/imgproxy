@@ -9,7 +9,16 @@ import (
 )
 
 func newLoadOptions(shrink float64, page, pages int) C.ImgproxyLoadOptions {
+	return newLoadOptionsAccess(C.VIPS_ACCESS_SEQUENTIAL, shrink, page, pages)
+}
+
+// newLoadOptionsAccess is newLoadOptions with an explicit access mode. The Wix
+// pipeline needs VIPS_ACCESS_RANDOM; everything else uses SEQUENTIAL.
+func newLoadOptionsAccess(
+	access C.VipsAccess, shrink float64, page, pages int,
+) C.ImgproxyLoadOptions {
 	return C.ImgproxyLoadOptions{
+		Access:    access,
 		Shrink:    C.double(shrink),
 		Thumbnail: 0, // Don't load thumbnail by default. Set it explicitly when needed.
 

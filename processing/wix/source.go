@@ -46,9 +46,18 @@ type Source struct {
 
 // NewSource reads the head of the master and decodes it into img.
 //
-// The image is always loaded at shrink 1. imgproxy's scaleOnLoad step would
-// shrink JPEG and WebP through the decoder before the resample, which changes
-// the pixels the resampler sees.
+// Two load rules, both load-bearing:
+//
+// Shrink is always 1. imgproxy's scaleOnLoad step would shrink JPEG and WebP
+// through the decoder before the resample, changing the pixels the resampler
+// sees.
+//
+// Access is RANDOM, not imgproxy's usual SEQUENTIAL. Under sequential access
+// reducev sits behind a line cache whose strip height decides which output rows
+// land on a phase tie, making the result depend both on that height and on what
+// consumes the resize -- a sharpen after it moves the boundaries and changes
+// the output. Random access removes the cache and is byte-exact on both the
+// plain and the sharpened path. OP-SPEC.md §2.
 func NewSource(img *vips.Image, data imagedata.ImageData) (*Source, error) {
 	r := data.Reader()
 	head := make([]byte, wixspec.HeadSize)
@@ -58,7 +67,9 @@ func NewSource(img *vips.Image, data imagedata.ImageData) (*Source, error) {
 	}
 	head = head[:n]
 
-	if err := img.Load(data, 1.0, 0, 1); err != nil {
+	if err := vips.WithRandomAccess(func() error {
+		return img.Load(data, 1.0, 0, 1)
+	}); err != nil {
 		return nil, fmt.Errorf("wix: cannot decode master: %w", err)
 	}
 

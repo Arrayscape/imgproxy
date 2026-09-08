@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/imgproxy/imgproxy/v4/imagedata"
@@ -115,14 +116,45 @@ func (img *Image) WixResetResolution() error {
 	return nil
 }
 
-// IsSequential reports whether the pipeline still carries VIPS_META_SEQUENTIAL.
+// wixRandomAccess makes the next Load open with VIPS_ACCESS_RANDOM.
 //
-// That hint is what makes the patched reducev install a line cache sized from
-// VIPS_TILE_HEIGHT. Materialising the pipeline (CopyMemory) drops it and
-// silently changes the transform, so the Wix pipeline asserts this immediately
-// before resizing.
-func (img *Image) IsSequential() bool {
-	return C.vips_is_sequential_wix(img.VipsImage) != 0
+// It is a package-level switch rather than a Load parameter because Load is
+// upstream's, called from the native pipeline too, and threading an access mode
+// through every caller would be a much larger diff for one consumer. Guarded by
+// a mutex and set only around a Wix load, which holds the OS thread anyway.
+var (
+	wixAccessMu     sync.Mutex
+	wixRandomAccess bool
+)
+
+// WithRandomAccess runs fn with loads opening in VIPS_ACCESS_RANDOM.
+//
+// OP-SPEC.md §2: "Open every image with access=random. This is the single most
+// important rule in this document after the geometry."
+//
+// reducev puts a SEQUENTIAL input behind a line cache, and that cache's strip
+// height decides which output rows land exactly on a phase tie -- so under
+// sequential access the result depends on the strip height AND on what consumes
+// the resize. Chaining a sharpen after the resize changes the demand pattern,
+// moves the strip boundaries, and changes the output; a tile height tuned for
+// the plain path is wrong for the sharpened path. Random access removes the
+// line cache entirely and is byte-exact on both.
+func WithRandomAccess(fn func() error) error {
+	wixAccessMu.Lock()
+	wixRandomAccess = true
+	defer func() {
+		wixRandomAccess = false
+		wixAccessMu.Unlock()
+	}()
+	return fn()
+}
+
+// loadAccess reports the access mode the next load should use.
+func loadAccess(imagedata.ImageData) C.VipsAccess {
+	if wixRandomAccess {
+		return C.VIPS_ACCESS_RANDOM
+	}
+	return C.VIPS_ACCESS_SEQUENTIAL
 }
 
 // saveWix runs one of the _wix savers into a fresh memory target and wraps the
@@ -194,13 +226,13 @@ func HasNearLosslessLevel() bool {
 
 // CheckWixEnvironment enforces OP-SPEC §1 and §2 when the Wix route is enabled.
 //
-// Everything that would silently change the transform is a hard error, not a
+// Anything that would silently change the transform is a hard error, not a
 // warning. A wrong build still serves images and still looks healthy -- it just
 // renders different bytes -- so the only safe failure mode is refusing to start.
 //
 // allowUnverified downgrades the libvips build checks to warnings, for running
 // on an unmodified upstream base and accepting non-exact output.
-func CheckWixEnvironment(allowWrongTileHeight, allowUnverified bool) (warnings []string, err error) {
+func CheckWixEnvironment(allowUnverified bool) (warnings []string, err error) {
 	// §2.1 -- no escape hatch: disabling the vector path is one of the two
 	// settings that costs roughly 5% of the corpus, and it is never wanted.
 	// Measured: 6 of 12 renditions change.
@@ -210,22 +242,9 @@ func CheckWixEnvironment(allowWrongTileHeight, allowUnverified bool) (warnings [
 				"changes the transform; unset it (OP-SPEC §2.1)")
 	}
 
-	// §2 -- reducev accumulates Y within a strip and restarts at each boundary,
-	// so the strip height decides which output rows land exactly on a phase
-	// tie. libvips defaults to 10; the CDN behaves as 16.
-	switch th, ok := os.LookupEnv("VIPS_TILE_HEIGHT"); {
-	case !ok:
-		// Patch 0001 reads g_getenv at each reducev call rather than at init,
-		// and cgo makes os.Setenv call C setenv(3), so setting it here works.
-		if serr := os.Setenv("VIPS_TILE_HEIGHT", "16"); serr != nil {
-			return nil, fmt.Errorf("cannot set VIPS_TILE_HEIGHT=16: %w", serr)
-		}
-	case th != "16" && !allowWrongTileHeight:
-		return nil, fmt.Errorf(
-			"VIPS_TILE_HEIGHT=%s but the Wix transform requires 16 (OP-SPEC §2); "+
-				"set it to 16, or set IMGPROXY_WIX_ALLOW_WRONG_TILE_HEIGHT=true to "+
-				"override deliberately", th)
-	}
+	// VIPS_TILE_HEIGHT is deliberately NOT checked. It only mattered under
+	// sequential access; the pipeline now opens images with access=random,
+	// which removes reducev's line cache entirely (OP-SPEC §2).
 
 	var problems []string
 
@@ -237,19 +256,15 @@ func CheckWixEnvironment(allowWrongTileHeight, allowUnverified bool) (warnings [
 			"libvips is %d.%d.%d, but OP-SPEC §1 pins 8.15.5", maj, min, mic))
 	}
 
-	// Patch 0002 is directly detectable. Patch 0001 is not -- it changes a
-	// literal inside reducev with no observable property -- but the two are
-	// applied together by docker/wix/Dockerfile, so 0002's absence means
-	// VIPS_TILE_HEIGHT above is inert and the transform is wrong.
+	// The one remaining patch is directly detectable.
 	if !HasNearLosslessLevel() {
 		problems = append(problems,
-			"libvips lacks the near_lossless_level property, so docker/wix/0002 is "+
-				"not applied (and almost certainly 0001 is not either, which makes "+
-				"VIPS_TILE_HEIGHT inert)")
+			"libvips lacks the near_lossless_level property, so the OP-SPEC §1 "+
+				"webpsave patch is not applied and lossless WebP cannot be expressed")
 	}
 
 	if len(problems) > 0 {
-		msg := "the Wix route needs the libvips built by docker/wix/Dockerfile: " +
+		msg := "the Wix route needs the libvips built by docker/wix/build-base.sh: " +
 			strings.Join(problems, "; ")
 		if !allowUnverified {
 			return nil, errors.New(msg +

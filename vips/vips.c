@@ -91,7 +91,7 @@ vips_jpegload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
   return check_shrink("vips_jpegload_source_go", lo.Shrink) ||
       vips_jpegload_source(
           VIPS_SOURCE(source), out,
-          "access", VIPS_ACCESS_SEQUENTIAL,
+          "access", lo.Access,
           "shrink", (int) lo.Shrink,
           NULL);
 }
@@ -103,7 +103,7 @@ vips_jxlload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoad
 #if VIPS_JXLLOAD_HAS_PAGE
   return vips_jxlload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       "page", lo.Page,
       "n", lo.Pages,
       NULL);
@@ -113,7 +113,7 @@ vips_jxlload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoad
   // becomes unreadable -- not just animated ones. Single-page JXL still loads.
   return vips_jxlload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       NULL);
 #endif
 }
@@ -123,7 +123,7 @@ vips_pngload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoad
 {
   return vips_pngload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       "unlimited", lo.PngUnlimited,
       NULL);
 }
@@ -134,7 +134,7 @@ vips_webpload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
   return check_shrink("vips_webpload_source_go", lo.Shrink) ||
       vips_webpload_source(
           VIPS_SOURCE(source), out,
-          "access", VIPS_ACCESS_SEQUENTIAL,
+          "access", lo.Access,
           "scale", 1.0 / lo.Shrink,
           "page", lo.Page,
           "n", lo.Pages,
@@ -146,7 +146,7 @@ vips_gifload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoad
 {
   return vips_gifload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       "page", lo.Page,
       "n", lo.Pages,
       NULL);
@@ -169,7 +169,7 @@ vips_svgload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoad
 
   return vips_svgload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       "scale", scale,
       "dpi", dpi,
       "unlimited", lo.SvgUnlimited,
@@ -181,7 +181,7 @@ vips_heifload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
 {
   return vips_heifload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       "thumbnail", lo.Thumbnail,
       NULL);
 }
@@ -192,7 +192,7 @@ vips_tiffload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
 #if VIPS_TIFFLOAD_HAS_UNLIMITED
   return vips_tiffload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       "page", lo.Page,
       "n", lo.Pages,
       "unlimited", lo.TiffUnlimited,
@@ -207,7 +207,7 @@ vips_tiffload_source_go(VipsImgproxySource *source, VipsImage **out, ImgproxyLoa
   // still works.
   return vips_tiffload_source(
       VIPS_SOURCE(source), out,
-      "access", VIPS_ACCESS_SEQUENTIAL,
+      "access", lo.Access,
       "page", lo.Page,
       "n", lo.Pages,
       NULL);

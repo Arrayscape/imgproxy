@@ -18,7 +18,6 @@ var (
 	IMGPROXY_WIX_AVIF        = env.Bool("IMGPROXY_WIX_AVIF")
 	IMGPROXY_WIX_AVIF_SPEED  = env.Int("IMGPROXY_WIX_AVIF_SPEED")
 	IMGPROXY_WIX_SIG_MODE    = env.String("IMGPROXY_WIX_SIGNATURE_MODE")
-	IMGPROXY_WIX_ALLOW_TH    = env.Bool("IMGPROXY_WIX_ALLOW_WRONG_TILE_HEIGHT")
 	IMGPROXY_WIX_ALLOW_VIPS  = env.Bool("IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS")
 	IMGPROXY_WIX_DERIVE      = env.Bool("IMGPROXY_WIX_DERIVATION_CACHE")
 	IMGPROXY_WIX_DERIVE_SIZE = env.Int("IMGPROXY_WIX_DERIVATION_CACHE_SIZE")
@@ -64,11 +63,6 @@ type Config struct {
 	AVIFSpeed int
 
 	SignatureMode string
-
-	// AllowWrongTileHeight permits a VIPS_TILE_HEIGHT other than 16. Running
-	// with the wrong value silently produces a different transform, so this
-	// must be set deliberately.
-	AllowWrongTileHeight bool
 
 	// AllowUnverifiedLibvips permits starting on a libvips that is not the
 	// patched 8.15.5 the transform is defined against -- for instance an
@@ -117,7 +111,6 @@ func LoadConfigFromEnv(c *Config) (*Config, error) {
 		IMGPROXY_WIX_AVIF.Parse(&c.AVIF),
 		IMGPROXY_WIX_AVIF_SPEED.Parse(&c.AVIFSpeed),
 		IMGPROXY_WIX_SIG_MODE.Parse(&c.SignatureMode),
-		IMGPROXY_WIX_ALLOW_TH.Parse(&c.AllowWrongTileHeight),
 		IMGPROXY_WIX_ALLOW_VIPS.Parse(&c.AllowUnverifiedLibvips),
 		IMGPROXY_WIX_DERIVE.Parse(&c.DerivationCache),
 		IMGPROXY_WIX_DERIVE_SIZE.Parse(&c.DerivationCacheSize),
