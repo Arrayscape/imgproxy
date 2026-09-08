@@ -26,24 +26,7 @@ func Encode(
 		return encodePNG(img, src)
 
 	case imagetype.WEBP:
-		// The codec follows the stored master, not alpha presence and not
-		// encode-both-and-keep-the-smaller. WIX-URL-SPEC §5.
-		if src.Lossy {
-			// §7.2 -- stock defaults otherwise: effort 4, no preset, no smart
-			// subsample.
-			if err := stripForLossy(img); err != nil {
-				return nil, err
-			}
-			return img.WixSaveWebP(enc.Quality, false, false, -1)
-		}
-		// §7.3 -- Q is fixed at 75 with a near-lossless level of 80. The URL's
-		// q_N does NOT apply on this path. Output is near-lossless rather than
-		// strictly lossless: pixels shift by at most 1.
-		if err := stripForLossy(img); err != nil {
-			return nil, err
-		}
-		return img.WixSaveWebP(
-			wixspec.LosslessWebPQuality, true, true, wixspec.LosslessWebPNearLosslessLvl)
+		return encodeWebP(img, src, enc)
 
 	case imagetype.AVIF:
 		// UNVERIFIED encoder settings; the §4 negotiation that selects it is
@@ -80,6 +63,55 @@ func Encode(
 		return nil, err
 	}
 	return img.Save(format, enc.Quality, nil)
+}
+
+// encodeWebP saves and then applies the §8.4 container fix-ups.
+//
+// The codec follows the STORED master, not alpha presence and not
+// encode-both-and-keep-the-smaller (WIX-URL-SPEC §5). The fix-ups afterwards
+// are not cosmetic: the coded payload already matches, and they are what makes
+// the FILE match -- a payload-only comparison called WebP finished while 22 of
+// 54 files still differed.
+func encodeWebP(img *vips.Image, src *Source, enc wixspec.Encoding) (imagedata.ImageData, error) {
+	// Read the resolution before Strip rewrites it: WebP has no pHYs chunk, so
+	// §8.3 step 3 has nothing to read it back from.
+	pxPerM := img.WixPixelsPerMetre()
+
+	if err := stripForLossy(img); err != nil {
+		return nil, err
+	}
+
+	var (
+		d   imagedata.ImageData
+		err error
+	)
+	if src.Lossy {
+		// §7.2 -- stock defaults otherwise: effort 4, no preset, no smart
+		// subsample.
+		d, err = img.WixSaveWebP(enc.Quality, false, false, -1)
+	} else {
+		// §7.3 -- Q is fixed at 75 with a near-lossless level of 80. The URL's
+		// q_N does NOT apply here. Output is near-lossless rather than strictly
+		// lossless: pixels shift by at most 1.
+		d, err = img.WixSaveWebP(
+			wixspec.LosslessWebPQuality, true, true, wixspec.LosslessWebPNearLosslessLvl)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("wix: webpsave: %w", err)
+	}
+	defer d.Close()
+
+	raw, err := io.ReadAll(d.Reader())
+	if err != nil {
+		return nil, fmt.Errorf("wix: reading encoded webp: %w", err)
+	}
+
+	fixed, err := wixspec.FinalizeWebP(raw, src.Head, pxPerM)
+	if err != nil {
+		return nil, fmt.Errorf("wix: webp finalize: %w", err)
+	}
+
+	return imagedata.NewFromBytesWithFormat(imagetype.WEBP, fixed), nil
 }
 
 // encodePNG saves with libvips' own defaults, then applies the container

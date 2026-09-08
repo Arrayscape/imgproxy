@@ -110,8 +110,8 @@ which is what the URL does anyway.
 
 ## 5. Metadata
 
-**Renditions are stripped.** Any `/v1/` URL returns a synthesised 11-tag EXIF
-whitelist and nothing else: Orientation, XResolution, YResolution,
+**Renditions are stripped, in both containers.** Any `/v1/` URL returns a
+synthesised 11-tag EXIF whitelist and nothing else: Orientation, XResolution, YResolution,
 ResolutionUnit, YCbCrPositioning, ExifVersion, ComponentsConfiguration,
 FlashpixVersion, ColorSpace, PixelXDimension, PixelYDimension. No GPS, no camera
 make or model, no timestamps, no software, no serial numbers. libvips forwards
@@ -119,6 +119,23 @@ source metadata by default and also writes a `zTXt` chunk and a *second* `eXIf`
 chunk; all three are removed. **This is a security control**, and it is covered
 by a test that renders a master carrying camera and timestamp tags and asserts
 none of it survives.
+
+WebP needs its own fix-ups (OP-SPEC §8.4), and they are required for
+byte-exactness rather than cosmetic — the coded payload was already exact,
+which is exactly why a payload-only comparison reported WebP as finished while
+22 of 54 *files* still differed. The CDN always emits
+
+```
+RIFF WEBP  VP8X  [ICCP]  [ALPH]  VP8|VP8L  EXIF
+```
+
+so three things are corrected: stray `XMP ` chunks are dropped (libvips writes
+them, the CDN never does, and they carry whatever the uploader's file held);
+the `EXIF` chunk is rebuilt as `"Exif\0\0"` + the same canonical 180 bytes
+rather than forwarding the master's, which libvips emits big-endian and without
+`YCbCrPositioning`; and `VP8X` is always written, synthesised when libvips
+omitted it, with flags `0x08` EXIF, `+0x20` ICCP, `+0x10` alpha and a canvas
+size read from the VP8/VP8L bitstream.
 
 > ### ⚠ The bare media path deliberately leaks
 >
@@ -279,8 +296,8 @@ Against live CDN output, on the master render path:
 | `fill` | 433 / 433 byte-exact |
 | `crop` | 70 / 70 |
 | `usm` | 685 / 685 |
-| WebP VP8L (lossless) | 24 / 24 |
-| WebP VP8 (lossy) | **4 / 5 — one open mismatch, under investigation** |
+| WebP VP8 (lossy) | 36 / 36 — whole-file |
+| WebP VP8L (lossless) | 48 / 48 — whole-file |
 
 **Not verified.** Treat these as best-effort, implemented from the specification
 rather than measured:

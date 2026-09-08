@@ -300,6 +300,43 @@ func (s *WixHandlerTestSuite) TestWebPCodecFollowsTheStoredMaster() {
 
 // --------------------------------------------------------------- metadata
 
+func (s *WixHandlerTestSuite) TestWebPCarriesTheCDNContainer() {
+	// OP-SPEC §8.4: the CDN always emits exactly
+	//   RIFF WEBP  VP8X  [ICCP]  [ALPH]  VP8|VP8L  EXIF
+	// The coded payload was already exact before these fix-ups existed, which
+	// is precisely why a payload-only check called WebP finished while the
+	// files still differed.
+	for _, tc := range []struct {
+		name, id   string
+		wantChunks []string
+		wantFlags  byte
+	}{
+		{"png master", wixRGB, []string{"VP8X", "VP8L", "EXIF"}, 0x08},
+		{"rgba master", wixRGBA, []string{"VP8X", "VP8L", "EXIF"}, 0x18},
+		{"jpeg master", wixJPEG, []string{"VP8X", "VP8 ", "EXIF"}, 0x08},
+		{"profiled master", wixICC, []string{"VP8X", "ICCP", "VP8L", "EXIF"}, 0x28},
+	} {
+		s.Run(tc.name, func() {
+			code, ct, body := s.get(tc.id+"/v1/fit/w_100,h_100,enc_auto/x", "image/webp")
+			s.Require().Equal(http.StatusOK, code)
+			s.Require().Equal("image/webp", ct)
+
+			cs, err := wixspec.SplitWebP(body)
+			s.Require().NoError(err)
+
+			got := make([]string, len(cs))
+			for i, c := range cs {
+				got[i] = c.FourCC
+			}
+			s.Equal(tc.wantChunks, got)
+			s.NotContains(got, "XMP ", "libvips writes XMP; the CDN never does")
+
+			s.Equal(tc.wantFlags, cs[0].Data[0], "VP8X flags")
+			s.Len(cs[len(cs)-1].Data, 186, `EXIF is "Exif\0\0" + the canonical 180 bytes`)
+		})
+	}
+}
+
 func (s *WixHandlerTestSuite) TestRenditionsDoNotLeakSourceMetadata() {
 	// OP-SPEC §8.2 calls this a security control: libvips forwards source
 	// metadata by default, so without the container fix-ups every rendition

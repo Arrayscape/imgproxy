@@ -180,6 +180,17 @@ func (img *Image) saveWix(
 	return i, nil
 }
 
+// WixPixelsPerMetre reports the image resolution the way a PNG pHYs chunk
+// encodes it. WebP carries no pHYs, so the §8.3 resolution precedence reads it
+// from the image instead.
+func (img *Image) WixPixelsPerMetre() uint32 {
+	xres := float64(C.vips_xres_wix(img.VipsImage)) // pixels per mm
+	if xres <= 0 {
+		return 0
+	}
+	return uint32(xres*1000 + 0.5)
+}
+
 // WixSavePNG encodes with libvips' own defaults. The container fix-ups in
 // OP-SPEC §8 are applied afterwards, on the encoded bytes.
 func (img *Image) WixSavePNG() (imagedata.ImageData, error) {

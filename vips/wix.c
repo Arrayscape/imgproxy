@@ -60,6 +60,12 @@ vips_reset_resolution_wix(VipsImage *in, VipsImage **out)
   return vips_copy(in, out, "xres", 1.0, "yres", 1.0, NULL);
 }
 
+double
+vips_xres_wix(VipsImage *in)
+{
+  return vips_image_get_xres(in);
+}
+
 int
 vips_pngsave_wix(VipsImage *in, VipsTarget *target)
 {

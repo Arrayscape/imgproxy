@@ -46,6 +46,10 @@ int vips_gaussblur_wix(VipsImage *in, VipsImage **out, double sigma);
 // from a master render (WIX-URL-SPEC §6.1).
 int vips_reset_resolution_wix(VipsImage *in, VipsImage **out);
 
+// Image resolution in pixels/mm, as pngsave would encode into pHYs. WebP has
+// no pHYs chunk, so the §8.3 resolution precedence needs it from the image.
+double vips_xres_wix(VipsImage *in);
+
 // Encoders. libvips/CLI defaults only -- see the note on vips_pngsave_go above.
 int vips_pngsave_wix(VipsImage *in, VipsTarget *target);
 int vips_webpsave_wix(VipsImage *in, VipsTarget *target,
