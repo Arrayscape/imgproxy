@@ -176,7 +176,9 @@ WebP:
 Progressive with libjpeg's own ten-scan progression, 4:4:4 at every quality, no
 restart markers. `--subsample-mode off` is load-bearing: libvips' `auto`
 subsamples below Q 90 and the CDN never does. Stock **libjpeg-turbo**, not
-mozjpeg — the DQT identifies the encoder as well as the quality.
+mozjpeg — the DQT identifies the encoder as well as the quality. This fork
+links 3.2.0 (upstream imgproxy's pin) against the reference image's 2.1.5;
+that difference has been checked and does not move the coded stream.
 
 Quality (§7.4), which is **not** the WebP rule:
 
@@ -360,11 +362,6 @@ rather than measured:
 - **JPEG from a PNG master.** §7.4's settings reproduce JPEG from a JPEG master,
   not from a PNG one (1/35 upstream, quality mispredicted on 20). Reachable via
   a `.jpg` name with no `enc_`, but no production url does it.
-- **libjpeg-turbo version.** This fork links **3.2.0** (upstream imgproxy's pin)
-  where the reference image carries **2.1.5**. §7.4's requirement is stock
-  libjpeg-turbo rather than mozjpeg, and the Annex K tables and quality formula
-  should be stable across that jump — but a major version bump could move the
-  coded stream, and this has not been checked against CDN bytes.
 - **`blur_N`** — one image, one sigma.
 - **`fp_<x>_<y>`** other than `0.50_0.50`. Whether `fp`'s presence changes the
   rounding the way `al`'s does is untested.

@@ -2,8 +2,11 @@ package integration_test
 
 import (
 	"bytes"
+	"testing"
+
 	"compress/zlib"
 	"encoding/binary"
+	"github.com/stretchr/testify/require"
 	"hash/crc32"
 	"io"
 	"strconv"
@@ -148,4 +151,34 @@ func withICCProfile(pngBytes, profile []byte) []byte {
 		}
 	}
 	return out.Bytes()
+}
+
+// jpegHeader walks a JPEG's APPn segments, returning their markers plus the
+// APP1 Exif payload and the APP2 ICC payload when present. Everything from the
+// first non-APPn marker on is the coded stream and is not inspected.
+func jpegHeader(t *testing.T, b []byte) (markers []byte, exif, icc []byte) {
+	t.Helper()
+	require.True(t, len(b) > 4 && b[0] == 0xFF && b[1] == 0xD8, "expected a JPEG")
+
+	off := 2
+	for off+4 <= len(b) {
+		require.Equal(t, byte(0xFF), b[off], "expected a marker at %d", off)
+		m := b[off+1]
+		if m < 0xE0 || m > 0xEF {
+			break // coded stream
+		}
+		n := int(binary.BigEndian.Uint16(b[off+2 : off+4]))
+		require.True(t, n >= 2 && off+2+n <= len(b), "truncated APPn at %d", off)
+		data := b[off+4 : off+2+n]
+
+		markers = append(markers, m)
+		switch {
+		case m == 0xE1 && bytes.HasPrefix(data, []byte("Exif\x00\x00")):
+			exif = data
+		case m == 0xE2:
+			icc = data
+		}
+		off += 2 + n
+	}
+	return markers, exif, icc
 }

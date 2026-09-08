@@ -342,6 +342,52 @@ func (s *WixHandlerTestSuite) TestWebPCarriesTheCDNContainer() {
 	}
 }
 
+func (s *WixHandlerTestSuite) TestJPEGCarriesTheCDNContainer() {
+	// OP-SPEC §8.5: SOI APP1(Exif) [APP2(ICC_PROFILE)] DQT ... EOI, with no
+	// APP0 JFIF and no trailing bytes.
+	for _, tc := range []struct {
+		name, id string
+		wantAPP2 bool
+	}{
+		{"jpeg master", wixJPEG, false},
+		{"profiled master", wixICC, true},
+	} {
+		s.Run(tc.name, func() {
+			// No enc_, and a .jpg name: §4.1 makes the extension decide.
+			code, ct, body := s.get(tc.id + "/v1/fit/w_100,h_100/x.jpg")
+			s.Require().Equal(http.StatusOK, code)
+			s.Require().Equal("image/jpeg", ct)
+
+			markers, exif, icc := jpegHeader(s.T(), body)
+
+			s.Equal(byte(0xE1), markers[0], "APP1 comes first")
+			s.NotContains(markers, byte(0xE0), "the APP0 JFIF is dropped")
+			s.Len(exif, 186, `APP1 is "Exif\0\0" + the canonical 180 bytes`)
+			s.Equal("II", string(exif[6:8]), "rebuilt little-endian")
+
+			if tc.wantAPP2 {
+				s.Require().NotNil(icc, "a profiled master keeps its ICC APP2")
+				s.True(bytes.HasPrefix(icc, []byte("ICC_PROFILE\x00")))
+				s.Len(markers, 2, "exactly APP1 then APP2")
+			} else {
+				s.Nil(icc, "an unprofiled master yields no APP2")
+				s.Len(markers, 1, "APP1 only")
+			}
+		})
+	}
+}
+
+func (s *WixHandlerTestSuite) TestJPEGDoesNotLeakMasterMetadata() {
+	// The largest metadata leak of any output format if the fix-ups are
+	// skipped: a full camera EXIF with an embedded thumbnail, plus XMP.
+	code, ct, body := s.get(wixRot + "/v1/fit/w_100,h_100/x.jpg")
+	s.Require().Equal(http.StatusOK, code)
+	s.Require().Equal("image/jpeg", ct)
+
+	_, exif, _ := jpegHeader(s.T(), body)
+	s.Len(exif, 186, "only the canonical block survives")
+}
+
 func (s *WixHandlerTestSuite) TestRenditionsDoNotLeakSourceMetadata() {
 	// OP-SPEC §8.2 calls this a security control: libvips forwards source
 	// metadata by default, so without the container fix-ups every rendition
