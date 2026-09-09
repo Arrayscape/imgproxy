@@ -32,6 +32,10 @@ func (s *WixCacheTestSuite) SetupSuite() {
 	s.Require().NoError(err)
 	s.masters = dir
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixRGB), gradientPNG(false), 0o644))
+
+	// An alpha master: the only fixture on which the derivation path's absence
+	// of premultiply is reachable at all.
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixRGBA), gradientPNG(true), 0o644))
 }
 
 func (s *WixCacheTestSuite) TearDownSuite() {
@@ -241,4 +245,119 @@ func (s *WixCacheTestSuite) TestDerivedRenditionCarriesNoAncestorMetadata() {
 
 func TestWixCache(t *testing.T) {
 	suite.Run(t, new(WixCacheTestSuite))
+}
+
+// OP-SPEC §10.1. A url's output size is a property of the url and the MASTER,
+// so a derived rendition must be exactly the size the from-master one would
+// have been -- only the pixels may differ.
+//
+// The superseded model re-resolved the url's segments against the ancestor's
+// dimensions, which changed the size too. That is the single most damaging way
+// to get derivation wrong, because the response still looks like a valid image.
+func (s *WixCacheTestSuite) TestDerivedRenditionHasTheSameDimensionsAsFromMaster() {
+	const target = wixRGB + "/v1/fit/w_137,h_137/x.png"
+
+	// Cold cache: from the master.
+	s.derive = true
+	s.ResetLazyObjects()
+	s.configure()
+	fromMaster, origin := s.fetch(target)
+	s.Require().Equal("master", origin)
+
+	// Fresh server, warm a larger rendition first so the same url derives.
+	s.ResetLazyObjects()
+	s.configure()
+	_, warm := s.fetch(wixRGB + "/v1/fit/w_400,h_400/x.png")
+	s.Require().Equal("master", warm)
+	derived, origin := s.fetch(target)
+	s.Require().Equal("derived", origin, "a larger rendition is cached, so derive")
+
+	wantW, wantH := pngSize(fromMaster)
+	gotW, gotH := pngSize(derived)
+	s.Equal(wantW, gotW, "derived width must match the from-master width")
+	s.Equal(wantH, gotH, "derived height must match the from-master height")
+	s.NotEqual(fromMaster, derived, "but the pixels do differ -- that is the point")
+}
+
+// Deriving is a plain resize with no crop, so a target that reads only part of
+// the master cannot come from a whole-master ancestor. It must fall back.
+func (s *WixCacheTestSuite) TestCroppingTargetsNeverDerive() {
+	s.derive = true
+	s.ResetLazyObjects()
+	s.configure()
+
+	// A large whole-master rendition, the best possible ancestor.
+	_, origin := s.fetch(wixRGB + "/v1/fit/w_400,h_400/x.png")
+	s.Require().Equal("master", origin)
+
+	for _, path := range []string{
+		// fill crops the overflow, so it reads a sub-region.
+		wixRGB + "/v1/fill/w_100,h_50/x.png",
+		// crop reads a sub-region by definition.
+		wixRGB + "/v1/crop/x_10,y_10,w_100,h_100/x.png",
+	} {
+		_, origin := s.fetch(path)
+		s.Equal("master", origin,
+			"%s reads a sub-region; a plain resize cannot produce it", path)
+	}
+}
+
+// Effects are not applied on the derivation path, so a url carrying them must
+// not be derived -- doing so would silently drop the sharpening it asked for.
+func (s *WixCacheTestSuite) TestEffectsForceTheMasterPath() {
+	s.derive = true
+	s.ResetLazyObjects()
+	s.configure()
+
+	_, origin := s.fetch(wixRGB + "/v1/fit/w_400,h_400/x.png")
+	s.Require().Equal("master", origin)
+
+	sharpened, origin := s.fetch(wixRGB + "/v1/fit/w_100,h_100,usm_0.66_1.00_0.01/x.png")
+	s.Equal("master", origin, "a sharpened rendition must be rendered, not derived")
+
+	plain, _ := s.fetch(wixRGB + "/v1/fit/w_100,h_100/x.png")
+	s.NotEqual(plain, sharpened, "and the sharpening must actually have happened")
+}
+
+// pngSize reads width and height from a PNG's IHDR.
+func pngSize(b []byte) (int, int) {
+	chunks, _ := splitPNGChunks(b)
+	for _, c := range chunks {
+		if c.typ == "IHDR" && len(c.data) >= 8 {
+			return int(binary.BigEndian.Uint32(c.data[0:4])),
+				int(binary.BigEndian.Uint32(c.data[4:8]))
+		}
+	}
+	return 0, 0
+}
+
+// The derivation path does no premultiply/unpremultiply even when the image
+// has alpha -- that belongs to the master path (OP-SPEC §10.1). An alpha master
+// is the only place that distinction is reachable, so it gets its own case:
+// the derived rendition must still be a correctly-sized RGBA PNG.
+func (s *WixCacheTestSuite) TestDerivesFromAnAlphaMaster() {
+	s.derive = true
+	s.ResetLazyObjects()
+	s.configure()
+
+	_, origin := s.fetch(wixRGBA + "/v1/fit/w_400,h_400/x.png")
+	s.Require().Equal("master", origin)
+
+	derived, origin := s.fetch(wixRGBA + "/v1/fit/w_100,h_100/x.png")
+	s.Require().Equal("derived", origin)
+
+	w, h := pngSize(derived)
+	s.Positive(w)
+	s.Positive(h)
+
+	// colour type 6 is RGBA: the alpha band must survive a path that never
+	// premultiplies it.
+	chunks, _ := splitPNGChunks(derived)
+	var colorType byte
+	for _, c := range chunks {
+		if c.typ == "IHDR" && len(c.data) >= 10 {
+			colorType = c.data[9]
+		}
+	}
+	s.Equal(byte(6), colorType, "alpha must survive derivation")
 }

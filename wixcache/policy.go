@@ -18,13 +18,12 @@ const DefaultMaxDepth = 1
 // target", but that alone is not sound: two `fill`s of different aspect ratios
 // can both be "larger" while covering DISJOINT parts of the master, and
 // deriving one from the other would silently return the wrong region. The
-// containment check below is the missing predicate.
+// framing check below is the missing predicate.
 //
-// Because Replan treats the ancestor AS the source, a cropped ancestor would
-// re-frame every subsequent transform against the crop rather than the master.
-// Whether the CDN does that is unmeasured, so only ancestors covering the whole
-// master are accepted -- the case where "the ancestor is the source" is
-// unambiguous. masterW/masterH are the master's dimensions.
+// Only ancestors covering the whole master are accepted. The CDN's own pyramid
+// levels are whole-master and aspect-preserved, and deriving is a plain resize
+// with no crop (§10.1), so a cropped ancestor has nothing it could correctly
+// produce. masterW/masterH are the master's dimensions.
 func Usable(e *Entry, t wix.Plan, maxDepth int, masterW, masterH int) bool {
 	if e.SrcRect != image.Rect(0, 0, masterW, masterH) {
 		return false
@@ -46,9 +45,24 @@ func Usable(e *Entry, t wix.Plan, maxDepth int, masterW, masterH int) bool {
 		return false
 	}
 
-	// The ancestor must cover the region the new request reads.
+	// The ancestor must frame EXACTLY the region the new request reads -- not
+	// merely contain it.
+	//
+	// Deriving is a plain resize with no crop (OP-SPEC §10.1), so a target that
+	// reads a sub-region of the ancestor cannot be produced from it at all: the
+	// resize would squash the whole ancestor into the target's box instead of
+	// cropping to the region and scaling that. Containment was the right
+	// predicate while derivation re-ran the pipeline; under a plain resize it
+	// silently produces a differently-framed image.
+	//
+	// In practice this means only whole-master targets derive -- `fit`, which
+	// uses the entire source. A `fill` that crops, or a `crop` op, falls back
+	// to the master. That is the conservative half of the trade: the CDN's own
+	// pyramid levels are whole-master and aspect-preserved (925x21 from a
+	// 1032x24 master), so a cropped target has no level it could have come
+	// from either.
 	want := image.Rect(t.NX, t.NY, t.NX+t.HW, t.NY+t.HH)
-	if !want.In(e.SrcRect) {
+	if want != e.SrcRect {
 		return false
 	}
 
@@ -90,26 +104,18 @@ func SelectAncestor(entries []*Entry, t wix.Plan, maxDepth, masterW, masterH int
 	return usable[0]
 }
 
-// Replan re-runs the URL against a cached ancestor.
+// DeriveDims returns the dimensions a derived rendition must be resized to.
 //
-// OP-SPEC §10 and WIX-URL-SPEC §6 both say the same thing: "the pipeline is
-// identical; only the input differs", and "run through the same pipeline". So
-// the ancestor IS the source -- the segments are resolved against its
-// dimensions exactly as if it were the master.
+// They come from the plan resolved against the MASTER, not from re-resolving
+// the url against the ancestor. A url's output size is a property of the url
+// and the master alone: the same request must produce the same dimensions
+// whether it was served from the master or from a cached rendition, and only
+// the pixels may differ. Re-resolving against the ancestor would change the
+// size too, which no CDN behaviour supports.
 //
-// This is NOT the same as mapping the master-relative plan into ancestor
-// coordinates by ratio. That was the first implementation here, and it differed
-// from this on 38% of sampled cases -- different scale, different drop, a crop
-// a pixel wider -- all of which change pixels.
-func Replan(segs []wix.Segment, e *Entry) (wix.Plan, bool) {
-	p, err := wix.Resolve(segs, e.Width, e.Height)
-	if err != nil {
-		return wix.Plan{}, false
-	}
-	// Deriving must never enlarge: falling back to the master is always
-	// correct, and the master still has the detail.
-	if p.S > 1.0 {
-		return wix.Plan{}, false
-	}
-	return p, true
-}
+// This replaces an earlier Replan that did exactly that -- resolved the
+// segments against the ancestor's dimensions "because the pipeline is
+// identical, only the input differs". OP-SPEC §10.1 measured the truth: the
+// derivation path is not the pipeline at all, it is a plain resize to the
+// target's own dimensions.
+func DeriveDims(t wix.Plan) (w, h int) { return t.W, t.H }

@@ -506,11 +506,16 @@ func (h *Handler) render(
 				return imagedata.NewFromBytesWithFormat(e.Format, e.Data), "cache", nil
 			}
 
+			// Effects are not applied on the derivation path -- it is a plain
+			// resize (OP-SPEC §10.1) -- so a request carrying usm or blur is
+			// never offered for derivation. Deriving it would silently drop the
+			// sharpening the url asked for; falling back to the master is
+			// always allowed and is what the CDN does when it has no level.
 			if anc := wixcache.SelectAncestor(
 				h.cache.Ancestors(r.MediaID), plan, h.config.DerivationMaxDepth, mw, mh,
-			); anc != nil {
+			); anc != nil && fx.IsZero() {
 				if data, src, derr := h.deriveFrom(
-					anc, r.Segments, plan, fx, enc, out, lossy, key, r.MediaID,
+					anc, plan, fx, enc, out, lossy, key, r.MediaID,
 				); derr == nil {
 					return data, src, nil
 				}
@@ -584,14 +589,17 @@ func (h *Handler) renderFromMaster(
 	return out, "master", nil
 }
 
-// deriveFrom renders a plan from a cached rendition instead of the master.
+// deriveFrom produces a rendition from a cached one instead of from the master.
 //
 // The ancestor is decoded from its stored PNG, which is what makes pHYs read
 // 1000 rather than the master's own resolution -- the marker the CDN's own
 // derived renditions carry (WIX-URL-SPEC §6.1).
+//
+// What happens to the pixels is a plain resize, not the §5 pipeline; see
+// procwix.Derive. fx is therefore not applied here at all, and callers must not
+// offer an effects-carrying request for derivation.
 func (h *Handler) deriveFrom(
 	anc *wixcache.Entry,
-	segs []wixspec.Segment,
 	plan wixspec.Plan,
 	fx wixspec.Effects,
 	enc wixspec.Encoding,
@@ -599,14 +607,6 @@ func (h *Handler) deriveFrom(
 	lossy bool,
 	key, mediaID string,
 ) (imagedata.ImageData, string, error) {
-	// The ancestor IS the source: the segments are resolved against its
-	// dimensions exactly as if it were the master. "The pipeline is identical;
-	// only the input differs" (OP-SPEC §10).
-	replanned, ok := wixcache.Replan(segs, anc)
-	if !ok {
-		return nil, "", errors.New("wix: cannot replan against the cached ancestor")
-	}
-
 	ancData := imagedata.NewFromBytesWithFormat(anc.Format, anc.Data)
 	defer ancData.Close()
 
@@ -643,7 +643,11 @@ func (h *Handler) deriveFrom(
 	// deriving it from its own pHYs.
 	src.Head = nil
 
-	if err := procwix.Render(img, src, replanned, fx, h.profilePath); err != nil {
+	// A plain resize to the target's own dimensions -- NOT the §5 pipeline
+	// (OP-SPEC §10.1). The dimensions come from the plan resolved against the
+	// MASTER: a url's output size must not depend on which input served it.
+	dw, dh := wixcache.DeriveDims(plan)
+	if err := procwix.Derive(img, dw, dh); err != nil {
 		return nil, "", err
 	}
 

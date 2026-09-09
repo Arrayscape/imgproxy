@@ -479,7 +479,7 @@ rather than measured:
 | §3.7 `quality_auto` | **parsed but inert** |
 | §4 format negotiation | implemented, all rows verified |
 | §5 WebP codec selection | implemented |
-| §6 cache-derived renditions | implemented, **off by default** — see below |
+| §6 / §10.1 cache-derived renditions | implemented as a plain resize, **off by default** — see below |
 | §7.1 renditions stripped | implemented |
 | §7.2 originals not stripped | implemented, deliberately |
 | §7.3 colour → Wix sRGB | implemented, including on a bare `crop` |
@@ -518,12 +518,40 @@ Off by default because **deriving deliberately changes output bytes**, and the
 master path is the one measured byte-exact against the CDN. With it off, nothing
 is ever served from a rendition — there is a test asserting exactly that.
 
-**The ancestor is the source.** Both specs say "the pipeline is identical; only
-the input differs" and "run through the same pipeline", so the URL's segments
-are resolved against the ancestor's dimensions exactly as if it were the master
-— not mapped from a master-relative plan into ancestor coordinates. That
-distinction is not academic: the two disagreed on 38% of sampled cases, with
-different scales, different drop counts and crops a pixel wider.
+**Deriving is a plain resize, not the pipeline.** This is the part OP-SPEC
+§10.1 says an implementation is most likely to get wrong, and it is right —
+both earlier attempts here were wrong, in opposite directions. The natural
+assumption, "same pipeline, different input", is false:
+
+```
+from the MASTER          §5: shrink + reduce, premultiply where there is
+                         alpha, the §4.5 drop rule, icc_transform, crop
+from a CACHED RENDITION  vips resize LEVEL.png OUT.png \
+                             <W_target/W_level> --vscale <H_target/H_level>
+```
+
+Measured on the CDN's own renditions: resizing a cached level down to a target
+below it reproduces that target **pixel-exactly** (mean|d| 0.0000, max 0) over
+five level→target pairs, and `979 → 900` correctly does *not* match, which is
+the selection rule working.
+
+So on this path there is no premultiply even when the image has alpha, no drop
+rule, no sharpen or blur, no `icc_transform` (the ancestor is already in Wix's
+sRGB — transforming again would move the colours twice), and no crop.
+
+Two details that are easy to get wrong, both pinned by tests:
+
+- **The two axes get independent scales.** A cached level is aspect-preserved
+  and rounded each axis separately when it was made — on a 1032×24 master the
+  925 level is 925×21, not 925×24 — so a single scale, or forcing a height,
+  stretches the image into something that matches nothing.
+- **The target's dimensions come from the plan resolved against the MASTER**,
+  never by re-resolving the URL against the ancestor. A URL's output size is a
+  property of the URL and the master alone: the same request must come back the
+  same size whether it was served from the master or derived, and only the
+  pixels may differ. Re-resolving against the ancestor — which is what this
+  fork did before §10.1 was measured — changes the size too, and the response
+  still looks like a perfectly valid image.
 
 **Deriving is proven to be reproducible.** OP-SPEC 1.7.0 briefly claimed
 otherwise — that a derived rendition could not be reproduced by re-running the
@@ -553,20 +581,32 @@ entry is usable only if **all** of:
 1. it has no effects baked in — a sharpened or blurred rendition is not a
    resamplable source;
 2. it is PNG — deriving from a lossy re-encode compounds artefacts;
-3. **its source rectangle contains the region the new request reads.** OP-SPEC
-   §10 suggests "smallest rendition at least as large as the target", but that
-   alone is unsound: two `fill`s of different aspect ratios can both be larger
-   while covering disjoint parts of the master. This is the missing predicate;
+3. **its source rectangle is exactly the region the new request reads** — not
+   merely one that contains it. OP-SPEC §10 suggests "smallest rendition at
+   least as large as the target", which is unsound on its own (two `fill`s of
+   different aspect ratios can both be larger while covering disjoint parts of
+   the master), and under §10.1 containment is not enough either: with no crop
+   step, resizing an ancestor that merely contains the target squashes the
+   whole ancestor into the target's box. In practice this means only
+   whole-master targets derive — `fit`, which uses the entire source. A `fill`
+   that crops, or a `crop` op, falls back to the master, which is also the only
+   thing the CDN could do: its pyramid levels are whole-master and
+   aspect-preserved, so a cropped target has no level it could have come from;
 4. it is at least as large as the target on both axes — never upsample from a
    rendition, the master still has the detail;
 5. its derivation depth is under the cap;
-6. it covers the whole master. Since the ancestor is treated as the source, a
-   cropped ancestor would re-frame every later transform against the crop
-   rather than the master. Whether the CDN does that is unmeasured, so it is
-   refused rather than guessed at.
+6. it covers the whole master — the shape the CDN's own pyramid levels have.
 
 Among those, the smallest by area wins, ties broken on the source rectangle so
 the choice does not depend on insertion order or map iteration.
+
+**A request carrying `usm` or `blur` is never derived at all.** §10.1 says the
+derivation path does not sharpen, so deriving such a request would silently
+drop the effect the URL asked for. Falling back to the master is always
+permitted, so it does that instead. Our fixtures cannot distinguish the absence
+of premultiply — the alpha master carries a constant alpha, where premultiply
+round-trips to the identity — so that part of §10.1 is assured by construction
+and by reading `Derive`, not by a test.
 
 **Nothing in the response says which input was used.** On the CDN a from-master
 and a cache-derived rendition are identical at the header level — only the

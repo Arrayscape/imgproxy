@@ -32,6 +32,13 @@ int vips_copy_wix(VipsImage *in, VipsImage **out);
 // precision §5.3 depends on.
 int vips_resize_wix(VipsImage *in, VipsImage **out, double scale);
 
+// Independent horizontal and vertical scales, for deriving a rendition from a
+// cached one (OP-SPEC section 10.1). A cached level is aspect-preserved and
+// rounds each axis separately, so the two ratios to a target are not equal --
+// on a 1032x24 master the 925 level is 925x21 -- and forcing one scale on both
+// axes stretches the image.
+int vips_resize_wix_xy(VipsImage *in, VipsImage **out, double hscale, double vscale);
+
 // usm_S_A_T -> --sigma S --m2 A --x1 (T*100) --y2 10 --y3 20 --m1 0.
 // vips_apply_filters passes only "sigma" and leaves the rest at libvips
 // defaults, which is a different sharpen.

@@ -23,24 +23,30 @@ func target(nx, ny, hw, hh, w, h int) wix.Plan {
 		S: float64(w) / float64(hw)}
 }
 
-func TestUsableRequiresContainment(t *testing.T) {
-	// OP-SPEC §10's "smallest rendition at least as large as the target" is not
-	// sufficient on its own: two fills of different aspect ratios can both be
-	// larger while covering DISJOINT parts of the master, and deriving one from
-	// the other would silently return the wrong region.
+// OP-SPEC §10's "smallest rendition at least as large as the target" is not
+// sufficient on its own, and under §10.1 not even containment is: deriving is a
+// plain resize with no crop, so the ancestor must frame exactly what the target
+// reads. Anything else silently returns a differently-framed image.
+func TestUsableRequiresExactFramingNotMerelyContainment(t *testing.T) {
 	big := entry(image.Rect(0, 0, 1000, 1000), 800, 800, 0)
 
+	// Wholly inside the ancestor -- would have been fine when derivation
+	// re-ran the pipeline and could crop. A plain resize cannot produce it.
 	inside := target(100, 100, 200, 200, 100, 100)
-	require.True(t, Usable(big, inside, DefaultMaxDepth, 1000, 1000))
+	require.False(t, Usable(big, inside, DefaultMaxDepth, 1000, 1000),
+		"a plain resize cannot crop, so containment is not enough")
 
-	// Same output size, but reads a region the ancestor never covered.
+	// Reads a region the ancestor never covered.
 	outside := target(900, 900, 200, 200, 100, 100)
-	require.False(t, Usable(big, outside, DefaultMaxDepth, 1000, 1000),
-		"an ancestor that does not contain the target region must be rejected")
+	require.False(t, Usable(big, outside, DefaultMaxDepth, 1000, 1000))
 
-	// Partially overlapping is still not containment.
+	// Partially overlapping.
 	partial := target(900, 0, 200, 200, 100, 100)
 	require.False(t, Usable(big, partial, DefaultMaxDepth, 1000, 1000))
+
+	// Exactly the ancestor's framing: derivable.
+	exact := target(0, 0, 1000, 1000, 100, 100)
+	require.True(t, Usable(big, exact, DefaultMaxDepth, 1000, 1000))
 }
 
 func TestUsableRejectsUnsuitableAncestors(t *testing.T) {
@@ -104,31 +110,50 @@ func TestSelectAncestorIsOrderIndependent(t *testing.T) {
 	require.Equal(t, first.SrcRect, second.SrcRect)
 }
 
-func TestReplanTreatsTheAncestorAsTheSource(t *testing.T) {
-	// "The pipeline is identical; only the input differs" -- so the segments
-	// resolve against the ancestor's dimensions, not the master's.
-	anc := entry(image.Rect(0, 0, 1000, 1000), 400, 400, 0)
-	segs := []wix.Segment{{Op: wix.OpFit, Params: wix.Params{"w": "100", "h": "100"}}}
-
-	p, ok := Replan(segs, anc)
-	require.True(t, ok)
-	require.Equal(t, 400, p.HW, "the whole ancestor is the source")
-	require.Equal(t, 400, p.HH)
-	require.Equal(t, 100, p.W)
-	require.InDelta(t, 0.25, p.S, 1e-12, "scale is relative to the ANCESTOR")
+// OP-SPEC §10.1: a url's output size is a property of the url and the MASTER.
+// The same request must come back the same size whether it was served from the
+// master or derived from a cached rendition; only the pixels may differ.
+//
+// The earlier Replan re-resolved the segments against the ancestor's
+// dimensions, which changed the output size too -- a 100x100 fit off a 400x400
+// ancestor of a 1000x1000 master stayed 100x100 only by coincidence of the
+// numbers. Nothing measured supports re-resolving.
+func TestDeriveDimsComeFromTheMasterPlan(t *testing.T) {
+	tgt := target(0, 0, 1000, 1000, 137, 91)
+	w, h := DeriveDims(tgt)
+	require.Equal(t, 137, w)
+	require.Equal(t, 91, h)
 }
 
-func TestReplanRefusesToEnlarge(t *testing.T) {
-	anc := entry(image.Rect(0, 0, 1000, 1000), 100, 100, 0)
-	segs := []wix.Segment{{Op: wix.OpFill, Params: wix.Params{"w": "400", "h": "400"}}}
-	_, ok := Replan(segs, anc)
-	require.False(t, ok, "falling back to the master is always correct")
+// Deriving is a plain resize with no crop, so an ancestor that merely CONTAINS
+// the target's region cannot produce it: the resize would squash the whole
+// ancestor into the target's box rather than crop to the region first. Under
+// the old re-run-the-pipeline model containment was enough; it is not now.
+func TestUsableRequiresExactFraming(t *testing.T) {
+	master := image.Rect(0, 0, 1000, 1000)
+
+	// A `fill` or `crop` target reads a sub-region of the master. The
+	// whole-master ancestor contains it, but cannot produce it by resizing.
+	cropTarget := target(100, 100, 800, 800, 200, 200)
+	full := entry(master, 500, 500, 0)
+	require.False(t, Usable(full, cropTarget, DefaultMaxDepth, 1000, 1000),
+		"containment is not enough without a crop step")
+
+	// A whole-master target -- what `fit` produces -- does derive.
+	fitTarget := target(0, 0, 1000, 1000, 200, 200)
+	require.True(t, Usable(full, fitTarget, DefaultMaxDepth, 1000, 1000))
+}
+
+func TestUsableRefusesToEnlarge(t *testing.T) {
+	tgt := target(0, 0, 1000, 1000, 400, 400)
+	small := entry(image.Rect(0, 0, 1000, 1000), 100, 100, 0)
+	require.False(t, Usable(small, tgt, DefaultMaxDepth, 1000, 1000),
+		"falling back to the master is always correct")
 }
 
 func TestUsableRequiresAnUncroppedAncestor(t *testing.T) {
-	// Replan re-frames against the ancestor, so a cropped ancestor would apply
-	// every later transform to the crop rather than the master. Unmeasured, so
-	// refused.
+	// The CDN's pyramid levels are whole-master; a cropped ancestor is not a
+	// level and has nothing it could correctly produce by a plain resize.
 	tgt := target(0, 0, 1000, 1000, 100, 100)
 	cropped := entry(image.Rect(100, 100, 900, 900), 500, 500, 0)
 	require.False(t, Usable(cropped, tgt, DefaultMaxDepth, 1000, 1000))

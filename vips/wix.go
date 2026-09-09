@@ -76,6 +76,19 @@ func (img *Image) WixResize(scale float64) error {
 	return nil
 }
 
+// WixResizeXY resizes with independent horizontal and vertical scales. Used
+// only on the derivation path (OP-SPEC §10.1), where the target's two axes
+// scale by different ratios because the cached ancestor rounded each one
+// separately when it was itself produced.
+func (img *Image) WixResizeXY(hscale, vscale float64) error {
+	var tmp *C.VipsImage
+	if C.vips_resize_wix_xy(img.VipsImage, &tmp, C.double(hscale), C.double(vscale)) != 0 {
+		return Error()
+	}
+	img.swapAndUnref(tmp)
+	return nil
+}
+
 // WixSharpen applies usm_S_A_T. Must run AFTER unpremultiply and after the
 // final extract_area, on the uchar image.
 func (img *Image) WixSharpen(sigma, x1, y2, y3, m1, m2 float64) error {

@@ -35,6 +35,13 @@ vips_resize_wix(VipsImage *in, VipsImage **out, double scale)
 }
 
 int
+vips_resize_wix_xy(VipsImage *in, VipsImage **out, double hscale, double vscale)
+{
+  return vips_resize(in, out, hscale,
+      "vscale", vscale, "kernel", VIPS_KERNEL_LANCZOS3, NULL);
+}
+
+int
 vips_sharpen_wix(VipsImage *in, VipsImage **out,
     double sigma, double x1, double y2, double y3, double m1, double m2)
 {
