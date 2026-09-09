@@ -20,6 +20,7 @@ var (
 	IMGPROXY_WIX_ALLOW_VIPS  = env.Bool("IMGPROXY_WIX_ALLOW_UNVERIFIED_LIBVIPS")
 	IMGPROXY_WIX_DERIVE      = env.Bool("IMGPROXY_WIX_DERIVATION_CACHE")
 	IMGPROXY_WIX_DERIVE_SIZE = env.Int("IMGPROXY_WIX_DERIVATION_CACHE_SIZE")
+	IMGPROXY_WIX_DERIVE_PATH = env.String("IMGPROXY_WIX_DERIVATION_CACHE_PATH")
 	IMGPROXY_WIX_DERIVE_DEPT = env.Int("IMGPROXY_WIX_DERIVATION_MAX_DEPTH")
 )
 
@@ -71,8 +72,14 @@ type Config struct {
 	// bytes, and the master path is the one measured byte-exact.
 	DerivationCache bool
 
-	// DerivationCacheSize bounds the in-process rendition cache, in bytes.
+	// DerivationCacheSize bounds the rendition cache, in bytes of payload.
 	DerivationCacheSize int
+
+	// DerivationCachePath makes the rendition cache durable. Without it the
+	// cache is in-process only: empty after every restart and not shared
+	// between replicas, so derivation stays far rarer than on the CDN, where
+	// roughly half of a mature URL set is derived.
+	DerivationCachePath string
 
 	// DerivationMaxDepth caps how many times output may be re-derived. The
 	// default of 1 derives only from a master render, never from a derived
@@ -108,6 +115,7 @@ func LoadConfigFromEnv(c *Config) (*Config, error) {
 		IMGPROXY_WIX_ALLOW_VIPS.Parse(&c.AllowUnverifiedLibvips),
 		IMGPROXY_WIX_DERIVE.Parse(&c.DerivationCache),
 		IMGPROXY_WIX_DERIVE_SIZE.Parse(&c.DerivationCacheSize),
+		IMGPROXY_WIX_DERIVE_PATH.Parse(&c.DerivationCachePath),
 		IMGPROXY_WIX_DERIVE_DEPT.Parse(&c.DerivationMaxDepth),
 	)
 }

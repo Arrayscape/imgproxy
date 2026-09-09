@@ -477,6 +477,11 @@ rather than measured:
 | §7.1 renditions stripped | implemented |
 | §7.2 originals not stripped | implemented, deliberately |
 | §7.3 colour → Wix sRGB | implemented, including on a bare `crop` |
+| §9.1 transform headers | implemented; `Vary` conditional on `enc_`, ranges served un-advertised |
+| §9.2 original headers | implemented; etag verified as md5 of the body, 304 shape asserted |
+| §9.3 error statuses | implemented; one cosmetic divergence, see §13.2 |
+| §9.4 no `content-encoding` | implemented |
+| §9.5 GIF pass-through headers | follows §9.2 — **the spec's own prediction, unmeasured** |
 
 ## 12. Cache-derived renditions (§6 / OP-SPEC §10)
 
@@ -486,9 +491,22 @@ same, **off by default**:
 
 ```
 IMGPROXY_WIX_DERIVATION_CACHE=true
-IMGPROXY_WIX_DERIVATION_CACHE_SIZE=536870912   # bytes, in-process
-IMGPROXY_WIX_DERIVATION_MAX_DEPTH=1            # derive only from a master render
+IMGPROXY_WIX_DERIVATION_CACHE_PATH=/var/cache/wix   # durable; omit for in-process
+IMGPROXY_WIX_DERIVATION_CACHE_SIZE=536870912        # bytes of payload
+IMGPROXY_WIX_DERIVATION_MAX_DEPTH=1                 # derive only from a master render
 ```
+
+**Give it a path.** Without one the cache is in-process: empty after every
+restart and not shared between replicas, so derivation stays far rarer here
+than on the CDN, where roughly half of a mature URL set is derived. The
+on-disk store is content-addressed, LRU-evicted against a byte budget, and
+rebuilds its index by scanning the directory on open — an index file can go
+stale or be truncated by a crash, while the directory is the truth. Payloads
+are written through a temp file and renamed, so a crash cannot leave a torn
+entry that a later run would serve as complete; a payload whose metadata is
+missing is dropped rather than served. Effects are recorded in the sidecar, so
+a sharpened rendition is never offered as a resamplable ancestor after a
+restart.
 
 Off by default because **deriving deliberately changes output bytes**, and the
 master path is the one measured byte-exact against the CDN. With it off, nothing
@@ -541,7 +559,90 @@ so a derived rendition carries `pHYs 1000` and an `XResolution` of `25400/1000`
 derived from it, per §8.3 step 3 — which is what the CDN emits, measured on
 1307 of 1307 cache-derived renditions. The master path is unaffected.
 
-## 13. Not implemented
+## 13. Response headers
+
+The header set is decided by which of the CDN's two services would have
+answered, not by the format or the operation. WIX-URL-SPEC §9.
+
+**Transforms** — anything with a `/v1/` segment:
+
+    cache-control: public, max-age=2592000, immutable
+    vary: Accept                      only when the url carries enc_avif or enc_auto
+
+Constant across every op, format, quality and geometry. `IMGPROXY_TTL` does not
+apply to this route; the value is part of the emulation, not a tuning knob.
+
+`Vary` is conditional and its absence is meaningful: with no `enc_`, `Accept` is
+ignored entirely (§4.1) and the filename extension alone decides the format, so
+there is nothing for a cache to vary on. Sending `Vary: Accept` anyway — which
+this fork used to do — splits caches on a header that cannot change the answer.
+
+Transforms carry **no `etag`, no `last-modified`, no `expires`, no
+`accept-ranges`**, whether served from the master or cache-derived; the two are
+indistinguishable at the header level. Range requests are still honoured (`206`
+with a `Content-Range`) despite `Accept-Ranges` never being advertised — both
+halves of that are measured CDN behaviour.
+
+**Originals** — the bare `/media/<id>`:
+
+    cache-control: public, max-age=15552000, immutable
+    expires:       date + 15552000s
+    last-modified: the stored object's own modification time
+    etag:          "<32-hex>", the md5 of the body
+    accept-ranges: bytes
+
+Six times a transform's TTL, and no `vary` — there is no negotiation on this
+path. Conditional GET is honoured: `If-None-Match` or `If-Modified-Since`
+return `304`, and that `304` omits `content-type`, `content-length` and
+`last-modified` while keeping `etag`, `expires` and `cache-control`.
+
+`Content-Encoding` is never sent on any route or format, even when the client
+advertises `gzip, br, deflate`.
+
+### 13.1 Errors
+
+Two shapes, because two different tiers produce them. Which one a request gets
+says where it was rejected:
+
+| Condition | Status | Body | `cache-control` |
+|---|---|---|---|
+| Unrecognised op, malformed path, nonexistent media id | 403 | `Forbidden` | `no-cache, private, must-revalidate, proxy-revalidate, no-store` |
+| Malformed parameter *value* on a valid op | 400 | `(fil) (dimensions) invalid width abc` | `private, no-cache, no-store, must-revalidate` |
+
+The first never reaches the image manipulator, so it reads as a routing
+failure rather than a processing one — 403, not 404 and not 500. The second
+does reach it, and the body names the value it could not use. The two
+`cache-control` strings differ in both content and directive order; that is
+reproduced deliberately rather than normalised.
+
+An unrecognised **output extension** is not an error at all. `.jxl`, `.tiff`,
+`.bmp` and `.gif` return `200` and fall back to the master's own stored format,
+byte-identical to naming that format outright. Only `png`, `jpg`/`jpeg`,
+`webp` and `avif` are recognised — the set the CDN can actually encode. This is
+an allowlist rather than a filter over what libvips supports, because
+`imagetype` knows both JXL and TIFF and would otherwise answer `.jxl` with
+JPEG XL, a capability the CDN does not have (§9).
+
+### 13.2 Known divergences
+
+Two, both cosmetic, both recorded rather than hidden:
+
+- **`Content-Type` on a 400 is `text/plain`, where the CDN sends
+  `text/plain; charset=utf-8`.** The status, body and cache-control all match.
+  Matching the charset too would mean bypassing imgproxy's shared error
+  middleware, and with it the monitoring and error-reporting every other route
+  gets; that is a bad trade for a parameter that changes nothing.
+
+- **`expires` is computed per response**, from the same clock as `date`. The
+  CDN freezes it when the entry is cached, so two fetches of one object share
+  an `expires` there and differ by a second or two here. The freeze point is
+  not observable from outside, so it cannot be reproduced.
+
+Only one op token in a 400 body is on record — `fill` prints as `fil`. That
+single measured value is reproduced; the other ops print their own names rather
+than generalising a truncation rule from one sample.
+
+## 14. Not implemented
 
 **A persistent rendition cache.** The derivation cache in §10 is in-process
 only, so it is empty after a restart and not shared between replicas. An

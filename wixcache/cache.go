@@ -91,8 +91,9 @@ type Store interface {
 	// Get returns an exact rendition.
 	Get(key string) (*Entry, bool)
 
-	// Put stores a rendition.
-	Put(key string, e *Entry)
+	// Put stores a rendition, indexed under its master so it can later be
+	// offered as an ancestor for that master.
+	Put(mediaID, key string, e *Entry)
 
 	// Ancestors returns cached renditions of one master, for derivation.
 	Ancestors(mediaID string) []*Entry
@@ -111,7 +112,7 @@ type Store interface {
 type Nop struct{}
 
 func (Nop) Get(string) (*Entry, bool)    { return nil, false }
-func (Nop) Put(string, *Entry)           {}
+func (Nop) Put(string, string, *Entry)   {}
 func (Nop) Ancestors(string) []*Entry    { return nil }
 func (Nop) Dims(string) (int, int, bool) { return 0, 0, false }
 func (Nop) PutDims(string, int, int)     {}

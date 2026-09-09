@@ -152,3 +152,42 @@ func TestFormatDispositionCoversEveryIngestOutcome(t *testing.T) {
 		})
 	}
 }
+
+// An extension outside the CDN's output set is not a format request and not an
+// error: it falls through to the master's format (§9.3). Answering .jxl with
+// JPEG XL, or .tiff with TIFF, would be a capability the CDN does not have --
+// and imagetype.GetTypeByName knows both, so the allowlist is what stops it.
+func TestFilenameFormatAllowlist(t *testing.T) {
+	for _, name := range []string{"x.jxl", "x.tiff", "x.tif", "x.bmp", "x.gif", "x.heic", "x.svg"} {
+		if got, ok := FilenameFormat(name); ok {
+			t.Errorf("FilenameFormat(%q) = %v, true; want unrecognised", name, got)
+		}
+	}
+	for name, want := range map[string]imagetype.Type{
+		"x.png": imagetype.PNG, "x.jpg": imagetype.JPEG, "x.JPEG": imagetype.JPEG,
+		"x.webp": imagetype.WEBP, "x.avif": imagetype.AVIF,
+	} {
+		got, ok := FilenameFormat(name)
+		if !ok || got != want {
+			t.Errorf("FilenameFormat(%q) = %v, %v; want %v, true", name, got, ok, want)
+		}
+	}
+}
+
+// The fallback has to reach Negotiate, not just FilenameFormat: a .jxl name on
+// a png master must serve png, byte-identical to asking for .png.
+func TestNegotiateUnknownExtensionFallsBackToMaster(t *testing.T) {
+	for _, name := range []string{"x.jxl", "x.tiff", "x", ""} {
+		if got := Negotiate(false, "", name, imagetype.PNG, true); got != imagetype.PNG {
+			t.Errorf("Negotiate(filename=%q, master=PNG) = %v; want PNG", name, got)
+		}
+	}
+	// ...and an explicitly recognised one still overrides the master.
+	if got := Negotiate(false, "", "x.jpg", imagetype.PNG, true); got != imagetype.JPEG {
+		t.Errorf("Negotiate(x.jpg, master=PNG) = %v; want JPEG", got)
+	}
+	// With AVIF disabled, .avif is unrecognised rather than an error.
+	if got := Negotiate(false, "", "x.avif", imagetype.PNG, false); got != imagetype.PNG {
+		t.Errorf("Negotiate(x.avif, allowAVIF=false) = %v; want PNG", got)
+	}
+}

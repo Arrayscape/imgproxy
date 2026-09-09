@@ -52,15 +52,8 @@ func (m *Memory) Get(key string) (*Entry, bool) {
 	return el.Value.(*memItem).entry, true
 }
 
-// Put stores a rendition. mediaID is carried on the Entry's key so the entry
-// can be indexed for ancestor lookup; see PutFor.
-func (m *Memory) Put(key string, e *Entry) {
-	m.PutFor("", key, e)
-}
-
-// PutFor stores a rendition and indexes it under a media id so it can later be
-// offered as an ancestor for that master.
-func (m *Memory) PutFor(mediaID, key string, e *Entry) {
+// Put stores a rendition and indexes it under its media id.
+func (m *Memory) Put(mediaID, key string, e *Entry) {
 	if e == nil || len(e.Data) == 0 || len(e.Data) > m.maxBytes {
 		return
 	}

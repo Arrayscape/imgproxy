@@ -43,17 +43,40 @@ func Negotiate(
 		}
 		return master
 	}
-	if t, ok := FilenameFormat(filename); ok {
+	if t, ok := FilenameFormat(filename); ok && (t != imagetype.AVIF || allowAVIF) {
 		return t
 	}
 	return master
 }
 
+// outputFormats is every format the CDN will encode a rendition into, and so
+// every extension the filename rule recognises. It is an ALLOWLIST, not a
+// filter over what libvips happens to support: an extension outside this set
+// -- `.jxl`, `.tiff`, `.bmp` -- is not an error and not a format request, it
+// simply does not decide anything, and the master's own format is used
+// instead (§9.3). Answering `.jxl` with JPEG XL would be a capability the CDN
+// does not have.
+//
+// GIF is absent deliberately. The CDN never encodes GIF; it passes a GIF
+// master through untransformed (OP-SPEC §9.1), which this table produces
+// naturally -- `.gif` falls through to the master's format, and a GIF master's
+// format is GIF.
+var outputFormats = map[string]imagetype.Type{
+	"png":  imagetype.PNG,
+	"jpg":  imagetype.JPEG,
+	"jpeg": imagetype.JPEG,
+	"webp": imagetype.WEBP,
+	"avif": imagetype.AVIF,
+}
+
 // FilenameFormat maps a rendition filename's extension to an output format.
+// The second result is false for an absent, empty or unrecognised extension,
+// which the caller must read as "the master decides", never as an error.
 func FilenameFormat(filename string) (imagetype.Type, bool) {
 	i := strings.LastIndexByte(filename, '.')
 	if i < 0 || i == len(filename)-1 {
 		return imagetype.Unknown, false
 	}
-	return imagetype.GetTypeByName(strings.ToLower(filename[i+1:]))
+	t, ok := outputFormats[strings.ToLower(filename[i+1:])]
+	return t, ok
 }

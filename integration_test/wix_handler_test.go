@@ -2,10 +2,13 @@ package integration_test
 
 import (
 	"bytes"
+	"crypto/md5"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -29,6 +32,7 @@ const (
 	wixLeaky = "0a7ba9_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee~mv2.png"
 	wixICC   = "0a7ba9_ffffffffffffffffffffffffffffffff~mv2.png"
 	wixRot   = "0a7ba9_60000000000000000000000000000000~mv2.jpg"
+	wixGIF   = "0a7ba9_70000000000000000000000000000000~mv2.gif"
 )
 
 // The masters are 512x392 -- an EVEN source dimension on both axes, which is
@@ -69,6 +73,29 @@ func (s *WixHandlerTestSuite) SetupSuite() {
 	// A landscape master tagged EXIF Orientation 6 (rotate 90° CW), so the
 	// rotated dimensions differ from the stored ones. See §4.0.
 	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixRot), orientedJPEG(6), 0o644))
+
+	// A GIF master, which the CDN passes through untransformed.
+	s.Require().NoError(os.WriteFile(filepath.Join(dir, wixGIF), gradientGIF(), 0o644))
+}
+
+// gradientGIF builds a small paletted GIF. It is deliberately NOT a format the
+// pipeline can round-trip: the point is that nothing decodes or re-encodes it.
+func gradientGIF() []byte {
+	pal := make(color.Palette, 256)
+	for i := range pal {
+		pal[i] = color.RGBA{uint8(i), uint8(255 - i), uint8(i / 2), 255}
+	}
+	img := image.NewPaletted(image.Rect(0, 0, 64, 48), pal)
+	for y := 0; y < 48; y++ {
+		for x := 0; x < 64; x++ {
+			img.SetColorIndex(x, y, uint8((x*4+y)%256))
+		}
+	}
+	var buf bytes.Buffer
+	if err := gif.Encode(&buf, img, nil); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
 }
 
 func (s *WixHandlerTestSuite) TearDownSuite() {
@@ -86,6 +113,12 @@ func (s *WixHandlerTestSuite) configure() {
 	c.Fetcher.Transport.Local.Root = s.masters
 	c.Handlers.Wix.Enabled = true
 	c.Handlers.Wix.SourceURLTemplate = "local:///%s"
+
+	// The shared server suite turns development errors on, which replaces the
+	// public message with a stack trace. WIX-URL-SPEC §9.3 specifies the
+	// public bodies exactly -- "Forbidden", and the manipulator's diagnostic
+	// for a bad parameter -- so this suite has to see what production sends.
+	c.Server.DevelopmentErrorsMode = false
 }
 
 // get fetches a Wix URL and returns the response body plus content type.
@@ -277,11 +310,190 @@ func (s *WixHandlerTestSuite) TestJPEGMasterFallsBackToJPEG() {
 	s.Equal("image/jpeg", ct)
 }
 
-func (s *WixHandlerTestSuite) TestVaryAccept() {
+// WIX-URL-SPEC §9.1. A transform's headers are decided by the route, not by
+// any TTL config, and they are constant across op, format, quality and
+// geometry -- so the only thing that varies is Vary itself.
+func (s *WixHandlerTestSuite) TestTransformResponseHeaders() {
+	// Without enc_, Accept is ignored entirely (§4.1) and NO Vary is sent.
+	// This is not merely "unset": advertising one would split caches on a
+	// header that cannot change the answer.
 	res := s.GET("/media/" + wixRGB + "/v1/fit/w_100,h_100/x.png")
 	defer res.Body.Close()
-	s.Contains(res.Header.Get("Vary"), "Accept",
-		"output depends on Accept, so caches must vary on it")
+
+	s.Equal("public, max-age=2592000, immutable", res.Header.Get("Cache-Control"))
+	s.Empty(res.Header.Get("Vary"), "no enc_, so Accept cannot change the output")
+
+	// A transform carries no validator and no freshness date of its own.
+	for _, h := range []string{"ETag", "Last-Modified", "Expires", "Accept-Ranges"} {
+		s.Empty(res.Header.Get(h), "transforms carry no %s", h)
+	}
+
+	// With enc_, and only then, the output does depend on Accept.
+	for _, enc := range []string{"enc_auto", "enc_avif"} {
+		res := s.GET("/media/" + wixRGB + "/v1/fit/w_100,h_100," + enc + "/x.png")
+		s.Equal("Accept", res.Header.Get("Vary"), "%s opts into negotiation", enc)
+		s.Equal("public, max-age=2592000, immutable", res.Header.Get("Cache-Control"))
+		res.Body.Close()
+	}
+}
+
+// Ranges are served -- 206 with a Content-Range -- even though the route never
+// advertises accept-ranges on the full response. Both halves are measured CDN
+// behaviour, and they look contradictory, so both are asserted.
+func (s *WixHandlerTestSuite) TestTransformServesRangesWithoutAdvertising() {
+	h := http.Header{"Range": []string{"bytes=0-9"}}
+	res := s.GET("/media/"+wixRGB+"/v1/fit/w_100,h_100/x.png", h)
+	defer res.Body.Close()
+
+	s.Equal(http.StatusPartialContent, res.StatusCode)
+	s.Regexp(`^bytes 0-9/\d+$`, res.Header.Get("Content-Range"))
+	body, _ := io.ReadAll(res.Body)
+	s.Len(body, 10)
+}
+
+// §9.2. The bare original is answered by a different service than transforms
+// are, and the header set says so: six times the TTL, a validator, a date, and
+// range support it actually advertises.
+func (s *WixHandlerTestSuite) TestOriginalResponseHeaders() {
+	res := s.GET("/media/" + wixRGB)
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	s.Require().NoError(err)
+
+	s.Equal("public, max-age=15552000, immutable", res.Header.Get("Cache-Control"))
+	s.Equal("bytes", res.Header.Get("Accept-Ranges"))
+	s.NotEmpty(res.Header.Get("Expires"))
+	s.Empty(res.Header.Get("Vary"), "no negotiation happens on this path")
+
+	// The etag is md5 of the body -- verified by hashing, not assumed, because
+	// a client may legitimately compute it itself to check integrity.
+	s.Equal(fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum(body))), res.Header.Get("ETag"))
+}
+
+// A conditional GET is honoured, and the 304 drops exactly three headers
+// relative to the 200. Asserting what the 304 KEEPS matters as much: a cache
+// that loses cache-control or etag on revalidation re-downloads every time.
+func (s *WixHandlerTestSuite) TestOriginalConditionalGET() {
+	res := s.GET("/media/" + wixRGB)
+	etag := res.Header.Get("ETag")
+	lastMod := res.Header.Get("Last-Modified")
+	res.Body.Close()
+	s.Require().NotEmpty(etag)
+
+	for name, h := range map[string]http.Header{
+		"If-None-Match":     {"If-None-Match": []string{etag}},
+		"If-Modified-Since": {"If-Modified-Since": []string{lastMod}},
+	} {
+		res := s.GET("/media/"+wixRGB, h)
+		s.Equal(http.StatusNotModified, res.StatusCode, "%s should revalidate", name)
+
+		for _, dropped := range []string{"Content-Type", "Content-Length", "Last-Modified"} {
+			s.Empty(res.Header.Get(dropped), "%s: 304 must omit %s", name, dropped)
+		}
+		s.Equal(etag, res.Header.Get("ETag"), "%s: 304 keeps the validator", name)
+		s.Equal("public, max-age=15552000, immutable", res.Header.Get("Cache-Control"))
+		res.Body.Close()
+	}
+}
+
+// §9.3. The two error shapes are produced by different tiers and differ in
+// status, body and even the ordering of the cache-control directives. Getting
+// them backwards would make a routing failure look like a bad parameter.
+func (s *WixHandlerTestSuite) TestErrorResponses() {
+	const (
+		forbiddenCC = "no-cache, private, must-revalidate, proxy-revalidate, no-store"
+		badReqCC    = "private, no-cache, no-store, must-revalidate"
+	)
+
+	// Rejected upstream of the manipulator: unknown op, or no such media.
+	for _, path := range []string{
+		wixRGB + "/v1/bogus/w_1,h_1/x.png",
+		wixRGB + "/v2/fit/w_1,h_1/x.png",
+		"no_such_media~mv2.png/v1/fit/w_1,h_1/x.png",
+		"no_such_media~mv2.png",
+	} {
+		res := s.GET("/media/" + path)
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+
+		s.Equal(http.StatusForbidden, res.StatusCode, "path %q", path)
+		s.Equal("Forbidden", string(body), "path %q", path)
+		s.Equal(forbiddenCC, res.Header.Get("Cache-Control"), "path %q", path)
+	}
+
+	// Reached the manipulator, which reports which value it could not use.
+	for path, want := range map[string]string{
+		wixRGB + "/v1/fill/w_abc,h_100/x.png":     "(fil) (dimensions) invalid width abc",
+		wixRGB + "/v1/fit/w_0,h_100/x.png":        "(fit) (dimensions) invalid width 0",
+		wixRGB + "/v1/crop/x_q,y_0,w_5,h_5/x.png": "(crop) (coordinates) invalid x q",
+	} {
+		res := s.GET("/media/" + path)
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+
+		s.Equal(http.StatusBadRequest, res.StatusCode, "path %q", path)
+		s.Equal(want, string(body), "path %q", path)
+		s.Equal(badReqCC, res.Header.Get("Cache-Control"), "path %q", path)
+	}
+}
+
+// An unrecognised output extension is NOT an error: it falls back to the
+// master's stored format and must be byte-identical to naming that format
+// outright. imagetype knows both jxl and tiff, so without an explicit
+// allowlist this silently answers .jxl with JPEG XL -- a format the CDN
+// cannot produce.
+func (s *WixHandlerTestSuite) TestUnknownExtensionFallsBackToMasterFormat() {
+	want := s.GET("/media/" + wixRGB + "/v1/fit/w_100,h_100/x.png")
+	wantBody, err := io.ReadAll(want.Body)
+	want.Body.Close()
+	s.Require().NoError(err)
+
+	for _, ext := range []string{"jxl", "tiff", "tif", "bmp", "gif", "heic"} {
+		res := s.GET("/media/" + wixRGB + "/v1/fit/w_100,h_100/x." + ext)
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+
+		s.Equal(http.StatusOK, res.StatusCode, ".%s is not an error", ext)
+		s.Equal("image/png", res.Header.Get("Content-Type"), ".%s -> master format", ext)
+		s.Equal(wantBody, body, ".%s must be byte-identical to .png", ext)
+	}
+}
+
+// §7.5 / §9.5. A GIF master is answered by the media router even on a /v1/
+// transform url: the bytes come back untransformed AND under the original
+// header set, not the transform one. The §9.2 shape here is the spec's
+// prediction rather than a measurement, so this test pins our choice, not the
+// CDN's observed behaviour.
+func (s *WixHandlerTestSuite) TestGIFPassThroughUsesOriginalHeaders() {
+	master, err := os.ReadFile(filepath.Join(s.masters, wixGIF))
+	s.Require().NoError(err)
+
+	// A geometry that would visibly change the image if it were applied.
+	res := s.GET("/media/" + wixGIF + "/v1/fit/w_16,h_16/x.gif")
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	s.Require().NoError(err)
+
+	s.Equal(http.StatusOK, res.StatusCode)
+	s.Equal(master, body, "a GIF master is passed through untransformed")
+	s.Equal("image/gif", res.Header.Get("Content-Type"))
+
+	// The media router's header set, not the manipulator's.
+	s.Equal("public, max-age=15552000, immutable", res.Header.Get("Cache-Control"))
+	s.Equal("bytes", res.Header.Get("Accept-Ranges"))
+	s.Equal(fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum(master))), res.Header.Get("ETag"))
+	s.NotEmpty(res.Header.Get("Expires"))
+	s.Empty(res.Header.Get("Vary"))
+}
+
+// §9.4. No compression on any path, even when the client asks for it.
+func (s *WixHandlerTestSuite) TestNeverContentEncoded() {
+	h := http.Header{"Accept-Encoding": []string{"gzip, br, deflate"}}
+	for _, path := range []string{wixRGB + "/v1/fit/w_100,h_100/x.png", wixRGB} {
+		res := s.GET("/media/"+path, h)
+		s.Empty(res.Header.Get("Content-Encoding"), "path %q", path)
+		res.Body.Close()
+	}
 }
 
 func (s *WixHandlerTestSuite) TestWebPCodecFollowsTheStoredMaster() {

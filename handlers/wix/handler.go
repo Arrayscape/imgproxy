@@ -9,15 +9,19 @@ package wix
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/imgproxy/imgproxy/v4/errctx"
 	"github.com/imgproxy/imgproxy/v4/handlers"
@@ -71,7 +75,22 @@ func New(hCtx HandlerContext, config *Config) (*Handler, error) {
 	}
 
 	if config.DerivationCache {
-		h.cache = wixcache.NewMemory(config.DerivationCacheSize)
+		if config.DerivationCachePath != "" {
+			fs, ferr := wixcache.NewFS(config.DerivationCachePath, int64(config.DerivationCacheSize))
+			if ferr != nil {
+				return nil, ferr
+			}
+			h.cache = fs
+			slog.Info("wix: derivation cache on disk",
+				slog.String("path", config.DerivationCachePath),
+				slog.Int("max_bytes", config.DerivationCacheSize),
+				slog.Int("entries", fs.Len()))
+		} else {
+			h.cache = wixcache.NewMemory(config.DerivationCacheSize)
+			slog.Warn("wix: derivation cache is in-process only; it is empty after " +
+				"every restart and not shared between replicas. Set " +
+				"IMGPROXY_WIX_DERIVATION_CACHE_PATH to make it durable")
+		}
 		slog.Warn("wix: derivation cache is ON; renditions may be derived from " +
 			"cached renditions rather than the master, which deliberately changes " +
 			"output bytes (OP-SPEC §10)")
@@ -107,8 +126,12 @@ func (h *Handler) Execute(
 
 	r, err := wixspec.ParsePath(h.rawPath(req))
 	if err != nil {
-		return server.NewError(
-			handlers.NewInvalidPathError(req.Context(), err.Error()), handlers.ErrCategoryPathParsing)
+		// §9.3. A path that does not parse -- an unrecognised op, a missing
+		// /v1/, an undecodable segment -- is rejected upstream of the image
+		// manipulator, so it is a routing failure and reads as 403 Forbidden,
+		// not 404. A bad parameter VALUE is a different case; it reaches the
+		// manipulator and surfaces below as a 400.
+		return h.forbidden(rw, err)
 	}
 
 	if serr := h.verifySignature(req, r); serr != nil {
@@ -118,6 +141,14 @@ func (h *Handler) Execute(
 	imageURL := fmt.Sprintf(h.config.SourceURLTemplate, r.MediaID)
 	if err := h.Security().VerifySourceURL(imageURL); err != nil {
 		return server.NewError(errctx.Wrap(err), handlers.ErrCategorySecurity)
+	}
+
+	// Reject a parameter the ops cannot use before any fetch. The CDN answers
+	// 400 here rather than 403 because the request routed correctly; only the
+	// value is wrong. Checking it up front also means a malformed url never
+	// costs a master download.
+	if err := wixspec.ValidateParams(r.Segments); err != nil {
+		return h.badRequest(rw, err)
 	}
 
 	// OP-SPEC §9: the bare media path must be routed BEFORE the transform
@@ -189,9 +220,12 @@ func (h *Handler) serveOriginal(
 	req *http.Request,
 	imageURL string,
 ) *server.Error {
-	data, _, err := h.ImageDataFactory().DownloadSync(
+	data, originHeaders, err := h.ImageDataFactory().DownloadSync(
 		req.Context(), imageURL, "wix original", imagedata.DownloadOptions{})
 	if err != nil {
+		if isNotFound(err) {
+			return h.forbidden(rw, err)
+		}
 		return server.NewError(errctx.Wrap(err), handlers.ErrCategoryDownload)
 	}
 	defer data.Close()
@@ -201,18 +235,111 @@ func (h *Handler) serveOriginal(
 		return server.NewError(errctx.Wrap(serr), handlers.ErrCategoryImageDataSize)
 	}
 
-	rw.SetContentType(data.Format().Mime())
-	rw.SetContentLength(size)
-	rw.WriteHeader(http.StatusOK)
+	// §9.2. A different service answers this route than answers transforms,
+	// and it shows: six times the TTL, a validator, and range support.
+	//
+	// These go on Header() directly rather than through SetContentType /
+	// SetContentLength / SetExpires. ServeContent deletes content-type,
+	// content-length and last-modified when it turns the request into a 304,
+	// and flushHeaders would copy them straight back in from the staged set,
+	// producing a 304 carrying a body's headers.
+	rw.Header().Set("Content-Type", data.Format().Mime())
+	rw.Header().Set("Cache-Control", wixspec.OriginalCacheControl)
 
-	if _, cerr := io.Copy(rw, data.Reader()); cerr != nil {
-		server.LogResponse(reqID, req, http.StatusOK,
-			handlers.NewResponseWriteError(cerr), slog.String("image_url", imageURL))
-		return nil
+	// Frozen alongside max-age, for HTTP/1.0 caches. Wix computes it once at
+	// origin rather than per response, so two fetches of the same object share
+	// an Expires; we cannot observe their freeze point, so we compute it per
+	// response from the same clock that Date uses.
+	rw.Header().Set("Expires",
+		time.Now().UTC().Add(wixspec.OriginalMaxAge*time.Second).Format(http.TimeFormat))
+
+	// etag is md5 of the body -- verified against the CDN, not assumed. Strong,
+	// quoted, lowercase hex. The bare path serves stored bytes unmodified, so
+	// hashing what we are about to write is the same value the CDN publishes.
+	sum, herr := md5Reader(data.Reader())
+	if herr != nil {
+		return server.NewError(errctx.Wrap(herr), handlers.ErrCategoryImageDataSize)
 	}
-	server.LogResponse(reqID, req, http.StatusOK, nil,
-		slog.String("image_url", imageURL), slog.String("wix", "original"))
+	rw.Header().Set("ETag", `"`+sum+`"`)
+
+	// No vary: this route ignores Accept entirely -- it serves the stored
+	// object or nothing.
+
+	modTime := originLastModified(originHeaders)
+
+	// ServeContent handles If-None-Match, If-Modified-Since, If-Range and
+	// Range, including the 206 the CDN serves despite never advertising
+	// accept-ranges. We advertise it because the CDN does, on the full
+	// response only -- ServeContent sets its own on a 206.
+	rw.Header().Set("Accept-Ranges", "bytes")
+
+	rec := &statusRecorder{ResponseWriter: rw, code: http.StatusOK}
+	http.ServeContent(rec, req, "", modTime, data.Reader())
+
+	server.LogResponse(reqID, req, rec.code, nil,
+		slog.String("image_url", imageURL), slog.String("wix", "original"),
+		slog.Int("size", size))
 	return nil
+}
+
+// statusRecorder remembers the status ServeContent chose -- 200, 206 or 304 --
+// which the response writer does not expose, so the access log records what was
+// actually served rather than assuming a full body.
+type statusRecorder struct {
+	server.ResponseWriter
+	code int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.code = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// noAcceptRanges suppresses the accept-ranges header on a full response.
+// ServeContent sets it unconditionally; the transform route serves ranges but
+// never advertises that it does, so the header is removed at the moment the
+// status is known -- on a 206 ServeContent has already written its own
+// Content-Range and the advertisement is expected.
+type noAcceptRanges struct {
+	*statusRecorder
+}
+
+func (n *noAcceptRanges) WriteHeader(code int) {
+	if code != http.StatusPartialContent {
+		n.Header().Del("Accept-Ranges")
+	}
+	n.statusRecorder.WriteHeader(code)
+}
+
+// md5Reader hashes the whole stream and rewinds it, so the caller can still
+// serve from the same reader.
+func md5Reader(r io.ReadSeeker) (string, error) {
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	h := md5.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// originLastModified recovers the stored object's modification time from the
+// fetch, so ours tracks the object rather than the moment we happened to serve
+// it. A zero time makes ServeContent omit the header and ignore
+// If-Modified-Since, which is the honest answer when the origin gave us none.
+func originLastModified(h http.Header) time.Time {
+	if h == nil {
+		return time.Time{}
+	}
+	t, err := http.ParseTime(h.Get("Last-Modified"))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 func (h *Handler) serveTransform(
@@ -242,8 +369,38 @@ func (h *Handler) serveTransform(
 				handlers.NewCantLoadError(ctx, imagetype.Unknown),
 				handlers.ErrCategoryPathParsing)
 		}
+		// A media id that does not exist is a routing failure to the CDN,
+		// answered 403 by the same tier that rejects an unknown op -- it never
+		// reaches the manipulator, so it cannot produce a manipulator error.
+		if isNotFound(rerr) {
+			return h.forbidden(rw, rerr)
+		}
+		// A parameter value the geometry could not use. Reached the
+		// manipulator, so 400.
+		if errors.Is(rerr, wixspec.ErrBadParams) {
+			return h.badRequest(rw, rerr)
+		}
 		return server.NewError(errctx.Wrap(rerr), handlers.ErrCategoryProcessing)
 	}
+
+	// §7.5 / §9.5. A pass-through format is answered by the media router, not
+	// the image manipulator -- the same service that answers a bare original.
+	// So it takes the ORIGINAL header set, not the transform one: 180 days, an
+	// etag, a validator, conditional GET. Serving the CDN's bytes under the
+	// wrong service's headers would be a half-emulation.
+	//
+	// This re-fetches rather than reusing what render just read. The waste is
+	// bounded to pass-through masters, which are rare, and it buys the whole
+	// §9.2 contract -- including last-modified, which only the fetch knows --
+	// without threading origin headers back through the render path.
+	//
+	// The §9.2 shape here is the SPEC'S PREDICTION, not a measurement: no GIF
+	// master outside the probe uploads exists to check it against.
+	if origin == "passthrough" {
+		result.Close()
+		return h.serveOriginal(reqID, rw, req, imageURL)
+	}
+
 	defer result.Close()
 
 	size, serr := result.Size()
@@ -251,24 +408,51 @@ func (h *Handler) serveTransform(
 		return server.NewError(errctx.Wrap(serr), handlers.ErrCategoryImageDataSize)
 	}
 
-	rw.SetContentType(result.Format().Mime())
+	// Content-Type goes on Header() rather than through SetContentType, which
+	// only stages it: ServeContent sniffs the body when Header() has no
+	// content-type, and Go's sniffer does not know AVIF -- it would answer
+	// application/octet-stream and Set that, beating the staged value.
+	rw.Header().Set("Content-Type", result.Format().Mime())
 	rw.SetContentLength(size)
 	rw.SetCanonical(imageURL)
-	// The output format depends on Accept, so caches must vary on it (§4).
-	rw.Header().Add("Vary", "Accept")
+
+	// §9.1. Set directly rather than through SetExpires: the shape is a
+	// property of the route, not of any TTL config, and flushHeaders leaves an
+	// already-set Cache-Control alone.
+	rw.Header().Set("Cache-Control", wixspec.TransformCacheControl)
+
+	// Params() is cheap and pure -- the render path derives the same values
+	// independently; taking them again here keeps the header decision next to
+	// the header rather than threading it back out of render.
+	_, enc := r.Params()
+
+	// Vary only when the url opts into negotiation. Without enc_ the filename
+	// decides the format and Accept is ignored entirely, so the CDN sends no
+	// Vary at all -- advertising one would invite caches to split needlessly.
+	if wixspec.TransformVariesOnAccept(enc) {
+		rw.Header().Set("Vary", "Accept")
+	}
+
+	// Transforms carry no etag, last-modified, expires or accept-ranges,
+	// whether served from the master or cache-derived: the two are
+	// indistinguishable at the header level.
 	// Which input produced this response: master, a cached rendition, or an
 	// exact cache hit. The corpus scorer asserts this never says "derived"
 	// while the derivation cache is off.
 	rw.Header().Set("X-Wix-Source", origin)
-	rw.WriteHeader(http.StatusOK)
 
-	if _, cerr := io.Copy(rw, result.Reader()); cerr != nil {
-		server.LogResponse(reqID, req, http.StatusOK,
-			handlers.NewResponseWriteError(cerr), slog.String("image_url", imageURL))
-		return nil
-	}
+	// Range requests are honoured -- 206 with a Content-Range -- even though
+	// this route never advertises accept-ranges. noAcceptRanges strips the
+	// header ServeContent would otherwise add to the 200; on a 206 the
+	// advertisement is expected and stays.
+	//
+	// modtime is deliberately zero and no etag is set, so ServeContent adds
+	// neither last-modified nor a validator, and conditional requests are
+	// ignored rather than answered -- which is what the CDN does here.
+	rec := &statusRecorder{ResponseWriter: rw, code: http.StatusOK}
+	http.ServeContent(&noAcceptRanges{rec}, req, "", time.Time{}, result.Reader())
 
-	server.LogResponse(reqID, req, http.StatusOK, nil,
+	server.LogResponse(reqID, req, rec.code, nil,
 		slog.String("image_url", imageURL),
 		slog.String("wix_format", result.Format().String()),
 		slog.String("wix_source", origin))
@@ -553,12 +737,61 @@ func (h *Handler) storeKeyed(
 		Data: b, Format: out.Format(), SrcRect: rect,
 		Width: plan.W, Height: plan.H, Effects: fx, Depth: depth,
 	}
-	if m, ok := h.cache.(*wixcache.Memory); ok {
-		m.PutFor(mediaID, key, e)
-		return
-	}
-	h.cache.Put(key, e)
+	h.cache.Put(mediaID, key, e)
 }
 
 // unused keeps the options import honest until the derivation cache lands.
 var _ = options.New
+
+// forbidden answers 403 the way the CDN's routing tier does: a nonexistent
+// media id and an unrecognised op are indistinguishable to a client, both
+// "Forbidden", both uncacheable. §9.3.
+//
+// Cache-Control goes on before returning because the error middleware writes
+// the body itself, and flushHeaders deliberately sets no Cache-Control on a
+// 4xx -- so an already-present one survives, and an absent one stays absent.
+func (h *Handler) forbidden(rw server.ResponseWriter, err error) *server.Error {
+	rw.Header().Set("Cache-Control", wixspec.ForbiddenCacheControl)
+	return server.NewError(
+		errctx.NewTextError(err.Error(), 1,
+			errctx.WithStatusCode(http.StatusForbidden),
+			errctx.WithPublicMessage("Forbidden"),
+			errctx.WithShouldReport(false),
+		),
+		handlers.ErrCategoryPathParsing,
+	)
+}
+
+// badRequest answers 400 for a malformed parameter value on an op that is
+// itself valid. Note the cache-control differs from forbidden's in both order
+// and content -- a different tier composes it, and reproducing that difference
+// is the point. §9.3.
+func (h *Handler) badRequest(rw server.ResponseWriter, err error) *server.Error {
+	rw.Header().Set("Cache-Control", wixspec.BadRequestCacheControl)
+
+	msg := err.Error()
+	var pe wixspec.ParamError
+	if errors.As(err, &pe) {
+		msg = pe.CDNMessage()
+	}
+
+	return server.NewError(
+		errctx.NewTextError(err.Error(), 1,
+			errctx.WithStatusCode(http.StatusBadRequest),
+			errctx.WithPublicMessage(msg),
+			errctx.WithShouldReport(false),
+		),
+		handlers.ErrCategoryPathParsing,
+	)
+}
+
+// isNotFound reports whether a fetch failed because the object is not there,
+// as opposed to a transport or permission failure. Only the former is the
+// CDN's 403; a broken backend is still our fault and stays a 5xx.
+func isNotFound(err error) bool {
+	var nf interface{ StatusCode() int }
+	if errors.As(err, &nf) && nf.StatusCode() == http.StatusNotFound {
+		return true
+	}
+	return errors.Is(err, fs.ErrNotExist)
+}

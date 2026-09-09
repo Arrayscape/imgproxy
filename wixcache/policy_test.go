@@ -165,15 +165,15 @@ func TestMemoryEvictsByLRU(t *testing.T) {
 		return &Entry{Data: make([]byte, 100), Format: imagetype.PNG,
 			SrcRect: image.Rect(0, 0, 10, 10), Width: n, Height: n}
 	}
-	m.PutFor("mid", "a", mk(1))
-	m.PutFor("mid", "b", mk(2))
-	m.PutFor("mid", "c", mk(3))
+	m.Put("mid", "a", mk(1))
+	m.Put("mid", "b", mk(2))
+	m.Put("mid", "c", mk(3))
 	require.Equal(t, 3, m.Len())
 
 	_, ok := m.Get("a")
 	require.True(t, ok)
 
-	m.PutFor("mid", "d", mk(4)) // over budget: evicts the least recently used
+	m.Put("mid", "d", mk(4)) // over budget: evicts the least recently used
 	require.Equal(t, 3, m.Len())
 	_, ok = m.Get("b")
 	require.False(t, ok, "b was least recently used")
@@ -183,7 +183,7 @@ func TestMemoryEvictsByLRU(t *testing.T) {
 
 func TestNopStoreNeverCaches(t *testing.T) {
 	var s Store = Nop{}
-	s.Put("k", &Entry{Data: []byte("x")})
+	s.Put("m", "k", &Entry{Data: []byte("x")})
 	_, ok := s.Get("k")
 	require.False(t, ok)
 	require.Empty(t, s.Ancestors("m"))
