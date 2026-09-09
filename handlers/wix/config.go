@@ -22,6 +22,7 @@ var (
 	IMGPROXY_WIX_DERIVE_SIZE = env.Int("IMGPROXY_WIX_DERIVATION_CACHE_SIZE")
 	IMGPROXY_WIX_DERIVE_PATH = env.String("IMGPROXY_WIX_DERIVATION_CACHE_PATH")
 	IMGPROXY_WIX_DERIVE_DEPT = env.Int("IMGPROXY_WIX_DERIVATION_MAX_DEPTH")
+	IMGPROXY_WIX_DEBUG_SRC   = env.Bool("IMGPROXY_WIX_DEBUG_SOURCE_HEADER")
 )
 
 // Signature modes.
@@ -81,6 +82,15 @@ type Config struct {
 	// roughly half of a mature URL set is derived.
 	DerivationCachePath string
 
+	// DebugSourceHeader emits X-Wix-Source: master|cache|derived|passthrough.
+	//
+	// OFF by default, and deliberately so: on the CDN a from-master and a
+	// cache-derived rendition are indistinguishable at the header level, and
+	// OP-SPEC §12 says an implementation should not attempt to signal
+	// derivation status in headers. It exists for our own tests and for
+	// diagnosing a cache in a staging deployment.
+	DebugSourceHeader bool
+
 	// DerivationMaxDepth caps how many times output may be re-derived. The
 	// default of 1 derives only from a master render, never from a derived
 	// one, because quality degrades with every generation.
@@ -99,6 +109,7 @@ func NewDefaultConfig() Config {
 		DerivationCache:     false,
 		DerivationCacheSize: 512 << 20,
 		DerivationMaxDepth:  wixcache.DefaultMaxDepth,
+		DebugSourceHeader:   false,
 	}
 }
 
@@ -117,6 +128,7 @@ func LoadConfigFromEnv(c *Config) (*Config, error) {
 		IMGPROXY_WIX_DERIVE_SIZE.Parse(&c.DerivationCacheSize),
 		IMGPROXY_WIX_DERIVE_PATH.Parse(&c.DerivationCachePath),
 		IMGPROXY_WIX_DERIVE_DEPT.Parse(&c.DerivationMaxDepth),
+		IMGPROXY_WIX_DEBUG_SRC.Parse(&c.DebugSourceHeader),
 	)
 }
 

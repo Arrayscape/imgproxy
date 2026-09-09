@@ -243,10 +243,18 @@ A `q` outside the 28 measured points falls back to the nearest one and is
 flagged internally as inexact — it cannot be derived, only guessed. No
 production url uses one.
 
-**Status: reproduces the specified shape, not a settled result.** Upstream
-measures 21/25 on virgin masters, with four renditions differing by +1, +10,
-+29 and -37 bytes on identical input pixels, identical AV1 header fields and
-identical containers. That residual is unexplained.
+**Status: byte-exact, 8/8** on freshly uploaded masters spanning 218x100 to
+3581x2385 at quality 80/85/90 (OP-SPEC §7.5).
+
+The earlier 21/25 was not an encoder residual. The CDN returns TWO renditions
+for one AVIF transform -- a from-master encode and one built from a cached
+ancestor -- and picks per request, so a single request scores that coin flip
+rather than the encoder. AVIF carries no `Exif` item, so unlike PNG, JPEG and
+WebP there is no marker to tell the two apart from the bytes. Six fresh renders
+of one transform returned `23294, 23128, 23128, 23128, 23294, 23128`; 23294 is
+ours. Any AVIF figure below 8/8 is measuring how heavily a master has been
+probed -- each request creates an entry that becomes a candidate ancestor for
+the next -- not encoder accuracy.
 
 Because libaom 3.6.0 shares a soname with the 3.14.1 the base builds for
 libheif, both AVIF libraries are **static in a private prefix**
@@ -422,13 +430,11 @@ rather than measured:
   libvips+libheif build is 3/12 whole-file byte-exact and the residual is in
   the decode's YCbCr→RGB matrix step, not in anything downstream. Zero AVIF
   masters in the corpus, so zero impact today.
-- **AVIF output.** The negotiation that selects it is exact and the encoder
-  follows §7.5 — libavif 0.11.1 + libaom 3.6.0, `avifEncoderAddImage` flags 0,
-  `maxThreads >= 2`, `-ffp-contract=off` — but upstream measures it at **21/25
-  on virgin masters** with four renditions differing by +1, +10, +29 and -37
-  bytes on identical input pixels, identical AV1 header fields and identical
-  containers. That residual is unexplained, so this reproduces the specified
-  shape rather than a settled result.
+- **AVIF output.** Verified: the negotiation is exact and the encoder settings
+  reproduce the CDN **byte for byte, 8/8** on virgin masters (§5.2). The
+  previously unexplained 21/25 residual turned out to be the CDN's per-request
+  choice between a from-master and an ancestor-derived rendition, not an
+  encoder difference.
 - **JPEG from a PNG master.** §7.4's settings reproduce JPEG from a JPEG master,
   not from a PNG one (1/35 upstream, quality mispredicted on 20). Reachable via
   a `.jpg` name with no `enc_`, but no production url does it.
@@ -481,7 +487,7 @@ rather than measured:
 | §9.2 original headers | implemented; etag verified as md5 of the body, 304 shape asserted |
 | §9.3 error statuses | implemented; one cosmetic divergence, see §13.2 |
 | §9.4 no `content-encoding` | implemented |
-| §9.5 GIF pass-through headers | follows §9.2 — **the spec's own prediction, unmeasured** |
+| §9.5 GIF pass-through headers | implemented, **measured** — takes the §9.2 set, byte-identical to the bare original |
 
 ## 12. Cache-derived renditions (§6 / OP-SPEC §10)
 
@@ -519,12 +525,30 @@ are resolved against the ancestor's dimensions exactly as if it were the master
 distinction is not academic: the two disagreed on 38% of sampled cases, with
 different scales, different drop counts and crops a pixel wider.
 
-**Which ancestor gets used is our policy, not the CDN's.** The CDN's choice
-depends on node-local cache state at the moment an entry was first created:
-adjacent widths one pixel apart resolve differently, and once created an entry
-is frozen and shared. That is not reproducible in principle, so we define a
-policy that is a pure function of the request and the cache contents. An entry
-is usable only if **all** of:
+**Deriving is proven to be reproducible.** OP-SPEC 1.7.0 briefly claimed
+otherwise — that a derived rendition could not be reproduced by re-running the
+pipeline on the cached ancestor — and 1.9.0 retracted that: the test behind it
+had used ancestors that cannot be ancestors, namely widths the probing session
+had itself requested. Resampling the CDN's own cached rendition reproduces its
+derived rendition byte-exactly, 8 of 8. The model this cache is built on is the
+right one.
+
+**Which ancestor gets used is our policy, not the CDN's.** The CDN picks the
+smallest *pyramid level* above the target that the answering node can reach,
+else the master. The levels are a fixed internal set per master and are **not**
+the widths anyone requested — on a 1032-wide master they are 979, 925, 839,
+758, 604, 545, 472 and 391, and asking for a fresh `w_911` does not make 911 an
+ancestor for a later `w_887`. Where those widths come from is unmapped, so the
+level set cannot be reproduced.
+
+That is why the CDN can answer one url two different ways: which node handled
+the request, and what it held at that instant, is not observable. Both answers
+are correct. An implementation has no such ambiguity — it owns its cache and
+knows which levels exist — so OP-SPEC §10 asks only for a policy that is a pure
+function of the request and the cache contents, and names "smallest cached
+rendition at least as large as the target, else the master" as the obvious
+choice. Ours is that, plus the soundness conditions it leaves implicit. An
+entry is usable only if **all** of:
 
 1. it has no effects baked in — a sharpened or blurred rendition is not a
    resamplable source;
@@ -544,8 +568,13 @@ is usable only if **all** of:
 Among those, the smallest by area wins, ties broken on the source rectangle so
 the choice does not depend on insertion order or map iteration.
 
-Responses carry `X-Wix-Source: master | derived | cache` so which input produced
-them is observable from outside.
+**Nothing in the response says which input was used.** On the CDN a from-master
+and a cache-derived rendition are identical at the header level — only the
+payload's own `pHYs`/`XResolution` marker tells them apart — and OP-SPEC §12
+says an implementation should not try to signal derivation status either. For
+our own tests and for diagnosing a staging cache, `IMGPROXY_WIX_DEBUG_SOURCE_HEADER=true`
+adds `X-Wix-Source: master | cache | derived | passthrough`. It is off by
+default and should stay off in production.
 
 **Cached intermediates are stripped before being used as a source.** §6.1 notes
 that a derived rendition reads `pHYs 1000` because the intermediate lost its
@@ -599,6 +628,14 @@ return `304`, and that `304` omits `content-type`, `content-length` and
 `Content-Encoding` is never sent on any route or format, even when the client
 advertises `gzip, br, deflate`.
 
+**GIF is the exception to routing by url shape.** A `/v1/...` transform url on
+a `.gif` media id is answered by the media router, so it carries the ORIGINAL
+header set — 180 days, etag, last-modified, expires, accept-ranges — and the
+bytes are the untransformed master, byte-identical to the bare original. This
+is measured. An emulation that picks the header set from the url pattern rather
+than from which service would answer gets exactly this case wrong, so the
+choice here is made after the format is known, not before.
+
 ### 13.1 Errors
 
 Two shapes, because two different tiers produce them. Which one a request gets
@@ -623,24 +660,32 @@ an allowlist rather than a filter over what libvips supports, because
 `imagetype` knows both JXL and TIFF and would otherwise answer `.jxl` with
 JPEG XL, a capability the CDN does not have (§9).
 
-### 13.2 Known divergences
+### 13.2 Implementation notes
 
-Two, both cosmetic, both recorded rather than hidden:
+**Errors are written by this route, not by imgproxy's error middleware.** The
+middleware hard-codes `text/plain` and, with `IMGPROXY_DEVELOPMENT_ERRORS_MODE`
+on, replaces the body with a stack trace. Both are wrong here: §9.3 pins the
+body *and* the content-type — a charset on the 400, none on the 403 — and a
+client parsing our errors should not see a different contract because an
+operator turned on debugging. Monitoring and the access log still happen; error
+*reporting* does not, because these are client mistakes and carry
+`ShouldReport(false)`, which the middleware would have honoured anyway.
 
-- **`Content-Type` on a 400 is `text/plain`, where the CDN sends
-  `text/plain; charset=utf-8`.** The status, body and cache-control all match.
-  Matching the charset too would mean bypassing imgproxy's shared error
-  middleware, and with it the monitoring and error-reporting every other route
-  gets; that is a bad trade for a parameter that changes nothing.
-
-- **`expires` is computed per response**, from the same clock as `date`. The
-  CDN freezes it when the entry is cached, so two fetches of one object share
-  an `expires` there and differ by a second or two here. The freeze point is
-  not observable from outside, so it cannot be reproduced.
+**`Expires` is anchored to the stored object's `Last-Modified`**, not to the
+clock. §12 requires it be computed once rather than per request, and the CDN's
+own freeze point — when the entry was cached — is not observable from outside.
+The object's modification time is the one timestamp both ends agree on that
+does not move between requests. When the origin supplies no `Last-Modified`,
+`Expires` is omitted rather than invented: a per-request value would silently
+slide the freshness lifetime forward on every fetch.
 
 Only one op token in a 400 body is on record — `fill` prints as `fil`. That
 single measured value is reproduced; the other ops print their own names rather
 than generalising a truncation rule from one sample.
+
+Unemulated, and deliberately: `Age` (this is a single tier, so there is no
+shared cache in front to age against — §12 makes it optional), `HEAD`,
+multi-part and out-of-range `Range` requests, and `x-wixmp-trace`.
 
 ## 14. Not implemented
 

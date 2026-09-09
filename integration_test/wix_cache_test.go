@@ -50,6 +50,12 @@ func (s *WixCacheTestSuite) configure() {
 	c.Handlers.Wix.Enabled = true
 	c.Handlers.Wix.SourceURLTemplate = "local:///%s"
 	c.Handlers.Wix.DerivationCache = s.derive
+
+	// These tests are about which input produced a rendition, which production
+	// deliberately does not disclose -- the CDN's derived and from-master
+	// responses are identical at the header level (OP-SPEC §12). The header is
+	// opt-in for exactly this reason.
+	c.Handlers.Wix.DebugSourceHeader = true
 }
 
 // fetch returns the body and the X-Wix-Source header, which reports whether the

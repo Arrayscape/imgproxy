@@ -114,11 +114,16 @@ func (s *WixHandlerTestSuite) configure() {
 	c.Handlers.Wix.Enabled = true
 	c.Handlers.Wix.SourceURLTemplate = "local:///%s"
 
-	// The shared server suite turns development errors on, which replaces the
-	// public message with a stack trace. WIX-URL-SPEC §9.3 specifies the
-	// public bodies exactly -- "Forbidden", and the manipulator's diagnostic
-	// for a bad parameter -- so this suite has to see what production sends.
-	c.Server.DevelopmentErrorsMode = false
+	// X-Wix-Source is a test and staging affordance, off in production because
+	// the CDN gives derived and from-master renditions identical headers.
+	c.Handlers.Wix.DebugSourceHeader = true
+
+	// Note what is NOT set here: the shared suite turns DevelopmentErrorsMode
+	// on, which makes imgproxy's error middleware answer with a stack trace
+	// instead of the public message. §9.3 pins the error bodies and
+	// content-types exactly, so the Wix route writes them itself and a client
+	// sees the same contract whether or not the operator is debugging. Leaving
+	// the flag on is what proves that.
 }
 
 // get fetches a Wix URL and returns the response body plus content type.
@@ -368,6 +373,16 @@ func (s *WixHandlerTestSuite) TestOriginalResponseHeaders() {
 	// The etag is md5 of the body -- verified by hashing, not assumed, because
 	// a client may legitimately compute it itself to check integrity.
 	s.Equal(fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum(body))), res.Header.Get("ETag"))
+
+	// Expires is a property of the object, not of the response: OP-SPEC §12
+	// says it is computed once and not recomputed per request. A per-response
+	// value would slide forward on every fetch, quietly extending the
+	// freshness lifetime a cache thinks it has.
+	again := s.GET("/media/" + wixRGB)
+	defer again.Body.Close()
+	s.Equal(res.Header.Get("Expires"), again.Header.Get("Expires"),
+		"Expires must not move between two fetches of the same object")
+	s.Equal(res.Header.Get("Last-Modified"), again.Header.Get("Last-Modified"))
 }
 
 // A conditional GET is honoured, and the 304 drops exactly three headers
@@ -419,6 +434,12 @@ func (s *WixHandlerTestSuite) TestErrorResponses() {
 		s.Equal(http.StatusForbidden, res.StatusCode, "path %q", path)
 		s.Equal("Forbidden", string(body), "path %q", path)
 		s.Equal(forbiddenCC, res.Header.Get("Cache-Control"), "path %q", path)
+		s.Equal("text/plain", res.Header.Get("Content-Type"), "path %q", path)
+
+		// Nothing about an error may be cacheable or revalidatable.
+		for _, h := range []string{"ETag", "Last-Modified", "Age"} {
+			s.Empty(res.Header.Get(h), "path %q must not carry %s", path, h)
+		}
 	}
 
 	// Reached the manipulator, which reports which value it could not use.
@@ -434,6 +455,11 @@ func (s *WixHandlerTestSuite) TestErrorResponses() {
 		s.Equal(http.StatusBadRequest, res.StatusCode, "path %q", path)
 		s.Equal(want, string(body), "path %q", path)
 		s.Equal(badReqCC, res.Header.Get("Cache-Control"), "path %q", path)
+		s.Equal("text/plain; charset=utf-8", res.Header.Get("Content-Type"), "path %q", path)
+
+		for _, h := range []string{"ETag", "Last-Modified", "Age"} {
+			s.Empty(res.Header.Get(h), "path %q must not carry %s", path, h)
+		}
 	}
 }
 
@@ -459,11 +485,14 @@ func (s *WixHandlerTestSuite) TestUnknownExtensionFallsBackToMasterFormat() {
 	}
 }
 
-// §7.5 / §9.5. A GIF master is answered by the media router even on a /v1/
-// transform url: the bytes come back untransformed AND under the original
-// header set, not the transform one. The §9.2 shape here is the spec's
-// prediction rather than a measurement, so this test pins our choice, not the
-// CDN's observed behaviour.
+// §7.5 / §9.5, MEASURED. A GIF master is answered by the media router even on
+// a /v1/ transform url: the bytes come back untransformed AND under the
+// original header set, not the transform one -- byte-identical to the bare
+// original, same content-length, same etag, because it is the same object.
+//
+// This is the one case where the header set cannot be predicted from the url
+// shape. Routing headers on the url pattern rather than on which service would
+// answer gets exactly this case wrong, which is why it is tested.
 func (s *WixHandlerTestSuite) TestGIFPassThroughUsesOriginalHeaders() {
 	master, err := os.ReadFile(filepath.Join(s.masters, wixGIF))
 	s.Require().NoError(err)

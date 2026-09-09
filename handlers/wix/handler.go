@@ -131,7 +131,7 @@ func (h *Handler) Execute(
 		// manipulator, so it is a routing failure and reads as 403 Forbidden,
 		// not 404. A bad parameter VALUE is a different case; it reaches the
 		// manipulator and surfaces below as a 400.
-		return h.forbidden(rw, err)
+		return h.forbidden(reqID, rw, req, err)
 	}
 
 	if serr := h.verifySignature(req, r); serr != nil {
@@ -148,7 +148,7 @@ func (h *Handler) Execute(
 	// value is wrong. Checking it up front also means a malformed url never
 	// costs a master download.
 	if err := wixspec.ValidateParams(r.Segments); err != nil {
-		return h.badRequest(rw, err)
+		return h.badRequest(reqID, rw, req, err)
 	}
 
 	// OP-SPEC §9: the bare media path must be routed BEFORE the transform
@@ -224,7 +224,7 @@ func (h *Handler) serveOriginal(
 		req.Context(), imageURL, "wix original", imagedata.DownloadOptions{})
 	if err != nil {
 		if isNotFound(err) {
-			return h.forbidden(rw, err)
+			return h.forbidden(reqID, rw, req, err)
 		}
 		return server.NewError(errctx.Wrap(err), handlers.ErrCategoryDownload)
 	}
@@ -246,13 +246,6 @@ func (h *Handler) serveOriginal(
 	rw.Header().Set("Content-Type", data.Format().Mime())
 	rw.Header().Set("Cache-Control", wixspec.OriginalCacheControl)
 
-	// Frozen alongside max-age, for HTTP/1.0 caches. Wix computes it once at
-	// origin rather than per response, so two fetches of the same object share
-	// an Expires; we cannot observe their freeze point, so we compute it per
-	// response from the same clock that Date uses.
-	rw.Header().Set("Expires",
-		time.Now().UTC().Add(wixspec.OriginalMaxAge*time.Second).Format(http.TimeFormat))
-
 	// etag is md5 of the body -- verified against the CDN, not assumed. Strong,
 	// quoted, lowercase hex. The bare path serves stored bytes unmodified, so
 	// hashing what we are about to write is the same value the CDN publishes.
@@ -266,6 +259,21 @@ func (h *Handler) serveOriginal(
 	// object or nothing.
 
 	modTime := originLastModified(originHeaders)
+
+	// Expires is computed ONCE per object, not per response: OP-SPEC §12 is
+	// explicit that it must not be recomputed, and a client that fetches the
+	// same original twice must see the same date. The CDN freezes it when the
+	// entry is cached; that instant is not observable from outside, so the
+	// stored object's own modification time is the anchor -- the one timestamp
+	// both ends agree on and that does not move between requests.
+	//
+	// With no last-modified from the origin there is nothing stable to anchor
+	// to, and a per-request Expires would be worse than none: it would claim a
+	// freshness lifetime that silently slides forward on every fetch.
+	if !modTime.IsZero() {
+		rw.Header().Set("Expires",
+			modTime.UTC().Add(wixspec.OriginalMaxAge*time.Second).Format(http.TimeFormat))
+	}
 
 	// ServeContent handles If-None-Match, If-Modified-Since, If-Range and
 	// Range, including the 206 the CDN serves despite never advertising
@@ -373,12 +381,12 @@ func (h *Handler) serveTransform(
 		// answered 403 by the same tier that rejects an unknown op -- it never
 		// reaches the manipulator, so it cannot produce a manipulator error.
 		if isNotFound(rerr) {
-			return h.forbidden(rw, rerr)
+			return h.forbidden(reqID, rw, req, rerr)
 		}
 		// A parameter value the geometry could not use. Reached the
 		// manipulator, so 400.
 		if errors.Is(rerr, wixspec.ErrBadParams) {
-			return h.badRequest(rw, rerr)
+			return h.badRequest(reqID, rw, req, rerr)
 		}
 		return server.NewError(errctx.Wrap(rerr), handlers.ErrCategoryProcessing)
 	}
@@ -394,8 +402,12 @@ func (h *Handler) serveTransform(
 	// §9.2 contract -- including last-modified, which only the fetch knows --
 	// without threading origin headers back through the render path.
 	//
-	// The §9.2 shape here is the SPEC'S PREDICTION, not a measurement: no GIF
-	// master outside the probe uploads exists to check it against.
+	// Measured, not inferred: a transform url on a .gif id comes back with
+	// x-seen-by naming the media-router, a 180-day max-age, an etag equal to
+	// md5 of the body, and the same content-length as the bare original --
+	// because it IS the same object. This is the one case where the header set
+	// cannot be predicted from the url shape, so it is routed on which service
+	// would answer, never on the url pattern.
 	if origin == "passthrough" {
 		result.Close()
 		return h.serveOriginal(reqID, rw, req, imageURL)
@@ -437,9 +449,12 @@ func (h *Handler) serveTransform(
 	// whether served from the master or cache-derived: the two are
 	// indistinguishable at the header level.
 	// Which input produced this response: master, a cached rendition, or an
-	// exact cache hit. The corpus scorer asserts this never says "derived"
-	// while the derivation cache is off.
-	rw.Header().Set("X-Wix-Source", origin)
+	// exact cache hit. Off by default -- the CDN gives from-master and
+	// cache-derived renditions identical headers, and OP-SPEC §12 says not to
+	// signal derivation status. Only our own tests turn it on.
+	if h.config.DebugSourceHeader {
+		rw.Header().Set("X-Wix-Source", origin)
+	}
 
 	// Range requests are honoured -- 206 with a Content-Range -- even though
 	// this route never advertises accept-ranges. noAcceptRanges strips the
@@ -745,44 +760,77 @@ var _ = options.New
 
 // forbidden answers 403 the way the CDN's routing tier does: a nonexistent
 // media id and an unrecognised op are indistinguishable to a client, both
-// "Forbidden", both uncacheable. §9.3.
-//
-// Cache-Control goes on before returning because the error middleware writes
-// the body itself, and flushHeaders deliberately sets no Cache-Control on a
-// 4xx -- so an already-present one survives, and an absent one stays absent.
-func (h *Handler) forbidden(rw server.ResponseWriter, err error) *server.Error {
-	rw.Header().Set("Cache-Control", wixspec.ForbiddenCacheControl)
-	return server.NewError(
-		errctx.NewTextError(err.Error(), 1,
-			errctx.WithStatusCode(http.StatusForbidden),
-			errctx.WithPublicMessage("Forbidden"),
-			errctx.WithShouldReport(false),
-		),
-		handlers.ErrCategoryPathParsing,
-	)
+// "Forbidden", both uncacheable. WIX-URL-SPEC §9.3.
+func (h *Handler) forbidden(
+	reqID string, rw server.ResponseWriter, req *http.Request, err error,
+) *server.Error {
+	return h.writeError(reqID, rw, req, err,
+		http.StatusForbidden, "text/plain", wixspec.ForbiddenCacheControl, "Forbidden")
 }
 
 // badRequest answers 400 for a malformed parameter value on an op that is
-// itself valid. Note the cache-control differs from forbidden's in both order
-// and content -- a different tier composes it, and reproducing that difference
-// is the point. §9.3.
-func (h *Handler) badRequest(rw server.ResponseWriter, err error) *server.Error {
-	rw.Header().Set("Cache-Control", wixspec.BadRequestCacheControl)
-
+// itself valid. Both the cache-control and the content-type differ from
+// forbidden's -- different order, different directives, and a charset the 403
+// does not carry -- because a different tier composes them. Reproducing that
+// difference is the point. §9.3.
+func (h *Handler) badRequest(
+	reqID string, rw server.ResponseWriter, req *http.Request, err error,
+) *server.Error {
 	msg := err.Error()
 	var pe wixspec.ParamError
 	if errors.As(err, &pe) {
 		msg = pe.CDNMessage()
 	}
+	return h.writeError(reqID, rw, req, err,
+		http.StatusBadRequest, "text/plain; charset=utf-8", wixspec.BadRequestCacheControl, msg)
+}
 
-	return server.NewError(
-		errctx.NewTextError(err.Error(), 1,
-			errctx.WithStatusCode(http.StatusBadRequest),
-			errctx.WithPublicMessage(msg),
-			errctx.WithShouldReport(false),
-		),
-		handlers.ErrCategoryPathParsing,
+// writeError sends a client error with the exact shape §9.3 specifies, rather
+// than returning it for imgproxy's shared error middleware to render.
+//
+// The middleware hard-codes `text/plain` and, in development mode, replaces
+// the body with a stack trace. Both are wrong here: §9.3 pins the body AND the
+// content-type, down to the charset on the 400 and its absence on the 403, and
+// a client parsing our errors should not see a different contract because the
+// operator turned on debugging. What the middleware does that matters --
+// monitoring and the access log -- is done here instead. Error REPORTING is
+// not: these are client mistakes, and both carry ShouldReport(false), so the
+// middleware would not have reported them either.
+//
+// Nothing may be cached: no validator, no Age, and a no-store cache-control on
+// both. An error response that any layer stores is a correctness bug, because
+// it outlives the condition that produced it (OP-SPEC §12).
+func (h *Handler) writeError(
+	reqID string,
+	rw server.ResponseWriter,
+	req *http.Request,
+	cause error,
+	status int,
+	contentType, cacheControl, body string,
+) *server.Error {
+	werr := errctx.NewTextError(cause.Error(), 2,
+		errctx.WithStatusCode(status),
+		errctx.WithPublicMessage(body),
+		errctx.WithShouldReport(false),
 	)
+
+	if !errors.Is(cause, context.Canceled) {
+		h.Monitoring().SendError(req.Context(), handlers.ErrCategoryPathParsing, werr)
+	}
+
+	// Set on Header() directly: flushHeaders deliberately leaves Cache-Control
+	// alone on a 4xx, so an already-present value survives untouched.
+	rw.Header().Set("Content-Type", contentType)
+	rw.Header().Set("Cache-Control", cacheControl)
+	rw.WriteHeader(status)
+
+	if _, err := rw.Write([]byte(body)); err != nil {
+		server.LogResponse(reqID, req, status, handlers.NewResponseWriteError(err))
+		return nil
+	}
+
+	server.LogResponse(reqID, req, status, werr)
+	return nil
 }
 
 // isNotFound reports whether a fetch failed because the object is not there,
